@@ -39,10 +39,10 @@ TIME_MARKET_CLOSE = time(16, 0)
 # --- 核心策略配置 ---
 CONFIG = {
     "filter": {
-        "max_60d_gain": 3.0,     
-        "max_rsi": 85,           
-        "max_day_change": 0.15,  
-        "min_vol_ratio": 1.3,    
+        "max_60d_gain": 3.0,      
+        "max_rsi": 85,            
+        "max_day_change": 0.15,   
+        "min_vol_ratio": 1.3,     
         "intraday_vol_ratio": 1.8, 
         "min_converge_angle": 0.05
     },
@@ -53,7 +53,7 @@ CONFIG = {
     "system": {
         "cooldown_days": 5,
         "max_charts_per_scan": 5,
-        "history_days": 400      # 保持400天以确保EMA90准确
+        "history_days": 400
     },
     "emoji": {
         "GOD_TIER": "👑", "S_TIER": "🔥", "A_TIER": "📈", 
@@ -103,19 +103,23 @@ def get_user_data(user_id):
         settings["users"][uid_str] = {"stocks": [], "daily_status": {}}
     return settings["users"][uid_str]
 
-# --- 核心逻辑 (计算部分) ---
+# --- 核心逻辑 (指标计算) ---
 def calculate_nx_indicators(df):
     """计算核心指标，必须在每次更新数据后调用"""
-    # 确保数值类型正确
+    # 0. 数据清洗
     cols = ['open', 'high', 'low', 'close', 'volume']
     for c in cols:
         df[c] = pd.to_numeric(df[c], errors='coerce')
-        
+    
+    df = df[df['close'] > 0] # 剔除坏数据
+    
+    # 1. 基础 Nx 均线
     df['Nx_Blue_UP'] = df['high'].ewm(span=24, adjust=False).mean()
     df['Nx_Blue_DW'] = df['low'].ewm(span=23, adjust=False).mean()
     df['Nx_Yellow_UP'] = df['high'].ewm(span=89, adjust=False).mean()
     df['Nx_Yellow_DW'] = df['low'].ewm(span=90, adjust=False).mean()
     
+    # 2. MACD
     price_col = 'close'
     exp12 = df[price_col].ewm(span=12, adjust=False).mean()
     exp26 = df[price_col].ewm(span=26, adjust=False).mean()
@@ -123,19 +127,38 @@ def calculate_nx_indicators(df):
     df['DEA'] = df['DIF'].ewm(span=9, adjust=False).mean()
     df['MACD'] = (df['DIF'] - df['DEA']) * 2
     
+    # 3. RSI
     delta = df[price_col].diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
     rs = gain / loss
     df['RSI'] = 100 - (100 / (1 + rs))
     
+    # 4. Volume MA
     df['Vol_MA20'] = df['volume'].rolling(window=20).mean()
     
+    # 5. ATR (用于动态止损)
     df['tr1'] = df['high'] - df['low']
     df['tr2'] = abs(df['high'] - df['close'].shift(1))
     df['tr3'] = abs(df['low'] - df['close'].shift(1))
     df['TR'] = df[['tr1', 'tr2', 'tr3']].max(axis=1)
     df['ATR'] = df['TR'].rolling(window=14).mean()
+
+    # 6. [新增] 布林带 (Bollinger Bands)
+    df['BB_Mid'] = df['close'].rolling(20).mean()
+    df['BB_Std'] = df['close'].rolling(20).std()
+    df['BB_Up'] = df['BB_Mid'] + 2 * df['BB_Std']
+    df['BB_Low'] = df['BB_Mid'] - 2 * df['BB_Std']
+    # 宽度指标：越小代表波动越极致
+    df['BB_Width'] = (df['BB_Up'] - df['BB_Low']) / df['BB_Mid']
+
+    # 7. [新增] KDJ (9,3,3)
+    low_min = df['low'].rolling(9).min()
+    high_max = df['high'].rolling(9).max()
+    df['RSV'] = (df['close'] - low_min) / (high_max - low_min) * 100
+    df['K'] = df['RSV'].ewm(com=2).mean() # alpha=1/3
+    df['D'] = df['K'].ewm(com=2).mean()
+    df['J'] = 3 * df['K'] - 2 * df['D']
     
     return df
 
@@ -150,46 +173,43 @@ def process_dataframe_sync(hist_data):
 
 def merge_and_recalc_sync(df, quote):
     """
-    [新增] 将实时Quote缝合到历史DataFrame中，并重新计算指标
-    这是日内交易的核心：历史趋势 + 实时价格
+    将实时Quote缝合到历史DataFrame中，并重新计算指标
     """
     if df is None or quote is None: return df
     
-    # 解析 Quote 数据
     try:
-        # FMP timestamp 是 Unix timestamp (秒)
         quote_time = pd.to_datetime(quote['timestamp'], unit='s').tz_localize('UTC').tz_convert(MARKET_TIMEZONE)
-        # 移除时间部分，只保留日期，用于判断是"更新今日"还是"新增今日"
         quote_date = quote_time.normalize()
         
         last_idx = df.index[-1]
         last_date = last_idx.normalize() if hasattr(last_idx, 'normalize') else pd.to_datetime(last_idx).normalize()
 
+        # [修正] 强制校准 DayHigh/DayLow，防止API数据滞后导致 High < Price
+        current_price = quote['price']
+        safe_high = max(quote['dayHigh'], current_price, quote['open'])
+        safe_low = min(quote['dayLow'], current_price, quote['open'])
+
         new_row = {
             'open': quote['open'],
-            'high': max(quote['dayHigh'], quote['price']), # 保护：有时候价格比dayHigh还高
-            'low': min(quote['dayLow'], quote['price']),
-            'close': quote['price'],
+            'high': safe_high,
+            'low': safe_low,
+            'close': current_price,
             'volume': quote['volume'],
-            'date': quote_date # 索引使用日期
+            'date': quote_date
         }
-
-        # 逻辑：如果历史数据的最后一天 == Quote的日期，说明历史数据已经包含了今天（部分），需要覆盖更新
-        # 如果历史数据最后一天 < Quote的日期，说明是新的一天，追加
         
         df_mod = df.copy()
         
         if last_date == quote_date:
-            # 更新最后一行
+            # 更新今日数据
             for col in ['open', 'high', 'low', 'close', 'volume']:
                 df_mod.at[last_idx, col] = new_row[col]
         elif last_date < quote_date:
-            # 追加新的一行
+            # 开启新的一天
             new_df = pd.DataFrame([new_row])
             new_df = new_df.set_index('date')
             df_mod = pd.concat([df_mod, new_df])
         
-        # 必须重新计算指标，因为Close变了，EMA/RSI/MACD都会变
         return calculate_nx_indicators(df_mod)
         
     except Exception as e:
@@ -210,6 +230,7 @@ async def fetch_historical_batch(symbols: list, days=None):
         for i in range(0, len(symbols), chunk_size):
             chunk = symbols[i:i + chunk_size]
             symbols_str = ",".join(chunk)
+            # 使用 stable 接口
             url = f"https://financialmodelingprep.com/stable/historical-price-eod/full?symbol={symbols_str}&from={from_date}&to={to_date}&apikey={FMP_API_KEY}"
             try:
                 async with session.get(url) as response:
@@ -231,16 +252,14 @@ async def fetch_historical_batch(symbols: list, days=None):
     return results
 
 async def fetch_realtime_quotes(symbols: list):
-    """[新增] 批量获取实时报价"""
     if not symbols: return {}
-    chunk_size = 100 # Quote 接口通常支持更多
+    chunk_size = 100
     quotes_map = {}
     
     async with aiohttp.ClientSession() as session:
         for i in range(0, len(symbols), chunk_size):
             chunk = symbols[i:i + chunk_size]
             symbols_str = ",".join(chunk)
-            # 使用 quote 接口
             url = f"https://financialmodelingprep.com/stable/quote?symbol={symbols_str}&apikey={FMP_API_KEY}"
             try:
                 async with session.get(url) as response:
@@ -309,11 +328,13 @@ def check_signals_sync(df):
     triggers = []
     level = "NORMAL"
 
+    # --- 基础风控 ---
     low_60 = df['low'].tail(60).min()
     if curr['close'] > low_60 * CONFIG["filter"]["max_60d_gain"]: return False, "", "RISK_FILTER", [], []
     if abs((curr['close'] - prev['close']) / prev['close']) > CONFIG["filter"]["max_day_change"]: return False, "", "RISK_FILTER", [], []
     if curr['RSI'] > CONFIG["filter"]["max_rsi"]: return False, "", "RISK_FILTER", [], []
 
+    # --- 量能预估 (U型权重优化) ---
     ny_now = datetime.now(MARKET_TIMEZONE)
     market_open = ny_now.replace(hour=9, minute=30, second=0, microsecond=0)
     minutes_elapsed = (ny_now - market_open).total_seconds() / 60
@@ -323,7 +344,16 @@ def check_signals_sync(df):
     if is_open_market:
         safe_minutes = max(minutes_elapsed, 20) 
         projection_factor = 390 / safe_minutes
-        proj_vol = curr['volume'] * projection_factor
+        
+        # [优化] 时间权重：早盘和尾盘通常放量，中午缩量。
+        # 用线性推演容易在早盘高估全天成交量，在午盘低估。
+        hour = ny_now.hour
+        if 9 <= hour < 10: time_weight = 0.85 # 早盘打折
+        elif 10 <= hour < 15: time_weight = 1.15 # 午盘加权
+        elif hour >= 15: time_weight = 0.95 # 尾盘微调
+        else: time_weight = 1.0
+        
+        proj_vol = curr['volume'] * projection_factor * time_weight
         vol_threshold = CONFIG["filter"]["intraday_vol_ratio"]
     else:
         proj_vol = curr['volume']
@@ -331,38 +361,59 @@ def check_signals_sync(df):
         
     is_heavy_volume = proj_vol > curr['Vol_MA20'] * vol_threshold
 
+    # --- 策略 1: 布林带挤压突破 (Squeeze Breakout) ---
+    # 布林带宽度处于历史低位(最近60天最低的1.5倍以内) + 价格突破上轨 + 放量
+    if curr['BB_Width'] < df['BB_Width'].tail(60).min() * 1.5: 
+        if curr['close'] > curr['BB_Up'] and is_heavy_volume:
+            triggers.append(f"🚀 **BB Squeeze**: 布林带极致收口后放量突破")
+            if level == "NORMAL": level = "S_TIER"
+
+    # --- 策略 2: Nx 蓝梯 & 二次起爆 ---
     recent_10 = df.tail(10)
     had_breakout = (recent_10['close'] > recent_10['Nx_Blue_UP']).any()
     on_support = curr['close'] > curr['Nx_Blue_DW'] and curr['low'] <= curr['Nx_Blue_UP'] * 1.02
     
     if had_breakout and on_support and is_heavy_volume:
-        triggers.append(f"👑 **二次起爆**: 蓝梯回踩确认 + 放量启动")
+        triggers.append(f"👑 **Nx 二次起爆**: 蓝梯回踩确认 + 放量启动")
         level = "GOD_TIER"
 
     pattern_name, res_line, sup_line = identify_patterns(df)
-    if pattern_name:
-        if is_heavy_volume:
-            triggers.append(pattern_name)
-            if level != "GOD_TIER": level = "S_TIER"
+    if pattern_name and is_heavy_volume:
+        triggers.append(pattern_name)
+        if level != "GOD_TIER": level = "S_TIER"
 
     is_downtrend = curr['close'] < curr['Nx_Blue_DW'] 
     if prev['close'] < prev['Nx_Blue_UP'] and curr['close'] > curr['Nx_Blue_UP']:
         triggers.append(f"📈 **Nx 蓝梯突破**: 趋势转多确认")
         if level not in ["GOD_TIER", "S_TIER"]: level = "A_TIER"
 
-    low_20 = df['low'].tail(20).min()
-    price_is_low = curr['low'] <= low_20 * 1.02
-    dif_20_min = df['DIF'].tail(20).min()
-    divergence = (curr['DIF'] > dif_20_min) and (curr['MACD'] > prev['MACD'])
+    # --- 策略 3: 优化版底背离 & KDJ ---
+    # 定义低点
+    price_low_20 = df['close'].tail(20).min()
+    price_is_low = curr['close'] <= price_low_20 * 1.02
     
-    if price_is_low and divergence:
-        if is_downtrend or curr['RSI'] < 40:
-             triggers.append(f"💎 **Cd 结构底背离**: 底部反转信号")
-             if level not in ["GOD_TIER", "S_TIER", "A_TIER"]: level = "B_TIER"
+    # KDJ 金叉 (比RSI更灵敏)
+    if prev['J'] < 0 and curr['J'] > 0 and curr['K'] > curr['D']:
+        triggers.append(f"💎 **KDJ 绝地反击**: 极度超卖 J 值回升")
+        if level == "NORMAL": level = "B_TIER"
+    
+    # 结构底背离 (MACD)
+    # 价格新低(或接近新低)，但MACD没创新低
+    macd_low_20 = df['MACD'].tail(20).min()
+    if price_is_low and curr['MACD'] < 0:
+        if curr['MACD'] > macd_low_20 * 0.8: # MACD 明显垫高
+             if curr['DIF'] > df['DIF'].tail(20).min(): # DIF 也垫高
+                triggers.append(f"🛡️ **Cd 结构底背离**: 价格新低动能衰竭")
+                if level not in ["GOD_TIER", "S_TIER", "A_TIER"]: level = "B_TIER"
 
-    if prev['RSI'] < 30 and curr['RSI'] > 30:
-        triggers.append(f"🚀 **RSI 弘历战法**: 超卖金叉")
-        if level == "NORMAL": level = "C_TIER"
+    # --- 策略 4: 抛售高潮 (Selling Climax) ---
+    # 跌破布林下轨 + 巨量 + 长下影线
+    pinbar_ratio = (curr['close'] - curr['low']) / (curr['high'] - curr['low'] + 1e-9)
+    if curr['low'] < curr['BB_Low']: # 刺穿下轨
+        if proj_vol > curr['Vol_MA20'] * 2.5: # 2.5倍巨量
+            if pinbar_ratio > 0.5: # 收盘在K线上半部
+                triggers.append(f"🛡️ **抛售高潮**: 恐慌盘涌出后 V 反")
+                level = "A_TIER"
 
     if triggers:
         if is_downtrend and len(triggers) < 2 and level not in ["GOD_TIER", "S_TIER"]:
@@ -375,24 +426,38 @@ async def check_signals(df):
 
 def _generate_chart_sync(df, ticker, res_line=[], sup_line=[]):
     filename = f"{ticker}_alert.png"
+    # 获取最后收盘价和 ATR 用于画止损线
+    last_close = df['close'].iloc[-1]
+    last_atr = df['ATR'].iloc[-1] if 'ATR' in df.columns else last_close * 0.05
+    stop_price = last_close - 2 * last_atr
+
     s = mpf.make_marketcolors(up='r', down='g', inherit=True)
     my_style = mpf.make_mpf_style(base_mpl_style="ggplot", marketcolors=s, gridstyle=":")
     plot_df = df.tail(80)
+    
+    # 构造 Stop Loss 线数据 (全长直线)
+    stop_line = [stop_price] * len(plot_df)
+
     add_plots = [
         mpf.make_addplot(plot_df['Nx_Blue_UP'], color='dodgerblue', width=1.0),
         mpf.make_addplot(plot_df['Nx_Blue_DW'], color='dodgerblue', width=1.0),
         mpf.make_addplot(plot_df['Nx_Yellow_UP'], color='gold', width=1.0),
         mpf.make_addplot(plot_df['Nx_Yellow_DW'], color='gold', width=1.0),
+        # 添加止损线 (红色虚线)
+        mpf.make_addplot(stop_line, color='red', linestyle='--', width=1.2),
         mpf.make_addplot(plot_df['MACD'], panel=2, type='bar', color='dimgray', alpha=0.5, ylabel='MACD'),
         mpf.make_addplot(plot_df['DIF'], panel=2, color='orange'),
         mpf.make_addplot(plot_df['DEA'], panel=2, color='blue'),
     ]
+    
     kwargs = dict(type='candle', style=my_style, title=f"{ticker} Analysis", ylabel='Price', addplot=add_plots, volume=True, panel_ratios=(6, 2, 2), savefig=filename)
+    
     if res_line: 
         all_lines = []
         if res_line: all_lines.extend(res_line)
         if sup_line: all_lines.extend(sup_line)
         kwargs['alines'] = dict(alines=all_lines, colors='white', linewidths=1.5, linestyle='--')
+        
     mpf.plot(plot_df, **kwargs)
     return filename
 
@@ -479,10 +544,10 @@ class StockBotClient(discord.Client):
 
         if not all_tickers: return
 
-        # 1. 获取历史数据 (Base)
+        # 1. 获取历史数据
         hist_map = await fetch_historical_batch(list(all_tickers))
         
-        # 2. 获取实时报价 (Intraday Update)
+        # 2. 获取实时报价
         quotes_map = {}
         if is_open:
             quotes_map = await fetch_realtime_quotes(list(all_tickers))
@@ -490,10 +555,8 @@ class StockBotClient(discord.Client):
         alerts_buffer = []
 
         for ticker, df_hist in hist_map.items():
-            # 缝合逻辑：将实时报价缝合到历史数据中
             df = df_hist
             if ticker in quotes_map:
-                # 在线程池中执行缝合+重算，防止阻塞
                 df = await asyncio.to_thread(merge_and_recalc_sync, df_hist, quotes_map[ticker])
 
             user_ids = ticker_user_map[ticker]
@@ -735,6 +798,9 @@ async def test_command(interaction: discord.Interaction, ticker: str):
     atr_val = df['ATR'].iloc[-1] if 'ATR' in df.columns else (price * 0.05)
     stop_loss = price - (2 * atr_val)
 
+    # 即使没触发信号，test命令也强制画图，方便观察
+    if not reason: reason = "手动测试 (无信号)"
+    
     cf = await generate_chart(df, ticker, r_l, s_l)
     msg = f"✅ `{ticker}` | {level}\n💰 `${price:.2f}`\n📝 {reason}\n🛑 Stop: `${stop_loss:.2f}`"
     try:
