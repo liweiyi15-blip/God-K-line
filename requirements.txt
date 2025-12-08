@@ -1,0 +1,7 @@
+discord.py
+requests
+pandas
+numpy
+mplfinance
+pytz
+python-dotenv
