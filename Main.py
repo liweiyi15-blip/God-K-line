@@ -15,7 +15,7 @@ import aiohttp
 import io
 import matplotlib
 
-# --- [Fix Image 2] 强制使用非交互式后端，防止Docker崩溃 ---
+# --- [Fix] 强制使用非交互式后端，防止Docker/Railway崩溃 ---
 matplotlib.use('Agg')
 import mplfinance as mpf
 
@@ -24,16 +24,20 @@ load_dotenv()
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 FMP_API_KEY = os.getenv("FMP_API_KEY")
+
 try:
     ALERT_CHANNEL_ID = int(os.getenv("ALERT_CHANNEL_ID"))
 except (TypeError, ValueError):
     ALERT_CHANNEL_ID = 0
+    print("⚠️ [WARN] ALERT_CHANNEL_ID not set or invalid.")
 
 # --- 全局配置 ---
 MARKET_TIMEZONE = pytz.timezone('America/New_York')
 
+# [Fix] 适配 Railway Volume 路径
 SETTINGS_FILE = "/app/data/settings.json"
 if not os.path.exists("/app/data"):
+    # 本地开发回退路径
     SETTINGS_FILE = "settings.json"
 
 TIME_PRE_MARKET_START = time(9, 0)
@@ -47,8 +51,8 @@ CONFIG = {
         "max_rsi": 85,            
         "max_day_change": 0.15,   
         "min_vol_ratio": 1.3,     
-        "intraday_vol_ratio_normal": 1.8, # 正常时段阈值
-        "intraday_vol_ratio_open": 2.8,   # [Fix Image 1] 开盘30分钟阈值
+        "intraday_vol_ratio_normal": 1.8, 
+        "intraday_vol_ratio_open": 2.8,   
         "min_converge_angle": 0.05
     },
     "pattern": {
@@ -56,7 +60,7 @@ CONFIG = {
         "window": 60
     },
     "system": {
-        "cooldown_days": 3,          # [Fix Image 1] 缩短为72小时
+        "cooldown_days": 3,          
         "max_charts_per_scan": 5,
         "history_days": 400
     },
@@ -88,7 +92,8 @@ def load_settings():
         else:
             settings = {"users": {}, "signal_history": {}}
             save_settings()
-    except:
+    except Exception as e:
+        print(f"Error loading settings: {e}")
         settings = {"users": {}, "signal_history": {}}
 
 def save_settings():
@@ -170,6 +175,7 @@ def process_dataframe_sync(hist_data):
     if not hist_data: return None
     df = pd.DataFrame(hist_data)
     if 'date' not in df.columns: return None
+    # [Fix] 历史数据通常是 Naive Date (YYYY-MM-DD)，保持 Naive 以便和后续处理兼容
     df['date'] = pd.to_datetime(df['date'])
     df = df.set_index('date').sort_index(ascending=True)
     return calculate_nx_indicators(df)
@@ -177,16 +183,19 @@ def process_dataframe_sync(hist_data):
 def merge_and_recalc_sync(df, quote):
     """
     将实时Quote缝合到历史DataFrame中，并重新计算指标
-    [Updated] 同时将 Market Cap 注入到 DataFrame 属性中
     """
     if df is None or quote is None: return df
     
     try:
+        # [Fix] 致命错误修复：将时区 Aware 的实时时间转为 Naive，防止索引类型冲突
         quote_time = pd.to_datetime(quote['timestamp'], unit='s').tz_localize('UTC').tz_convert(MARKET_TIMEZONE)
-        quote_date = quote_time.normalize()
+        quote_date = quote_time.normalize().tz_localize(None) # 移除时区信息，只保留日期
         
         last_idx = df.index[-1]
-        last_date = last_idx.normalize() if hasattr(last_idx, 'normalize') else pd.to_datetime(last_idx).normalize()
+        # 确保 last_idx 也是 Naive 的 (normalize 会保留时区如果原对象有时区，所以需要 double check)
+        last_date = pd.to_datetime(last_idx).normalize()
+        if last_date.tzinfo is not None:
+             last_date = last_date.tz_localize(None)
 
         current_price = quote['price']
         safe_high = max(quote['dayHigh'], current_price, quote['open'])
@@ -198,7 +207,7 @@ def merge_and_recalc_sync(df, quote):
             'low': safe_low,
             'close': current_price,
             'volume': quote['volume'],
-            'date': quote_date
+            'date': quote_date # 使用 Naive Date
         }
         
         df_mod = df.copy()
@@ -211,14 +220,14 @@ def merge_and_recalc_sync(df, quote):
             new_df = new_df.set_index('date')
             df_mod = pd.concat([df_mod, new_df])
         
-        # [Fix Image 1] 注入市值数据供策略使用
+        # 注入市值数据供策略使用
         if 'marketCap' in quote:
             df_mod.attrs['marketCap'] = quote['marketCap']
             
         return calculate_nx_indicators(df_mod)
         
     except Exception as e:
-        print(f"Merge Error: {e}")
+        print(f"❌ [Merge Error] {e}")
         return df
 
 async def fetch_historical_batch(symbols: list, days=None):
@@ -235,28 +244,25 @@ async def fetch_historical_batch(symbols: list, days=None):
         for i in range(0, len(symbols), chunk_size):
             chunk = symbols[i:i + chunk_size]
             symbols_str = ",".join(chunk)
+            # [URL] 保持使用 stable 接口，添加 serietype=line 可能有助于减少某些错误，但 full 历史更稳
             url = f"https://financialmodelingprep.com/stable/historical-price-eod/full?symbol={symbols_str}&from={from_date}&to={to_date}&apikey={FMP_API_KEY}"
             
-            # [DEBUG] 打印请求
-            print(f"🔎 [DEBUG] HistReq: {symbols_str}")
+            print(f"🔎 [DEBUG] HistReq: {chunk[:3]}...")
             
             try:
                 async with session.get(url) as response:
-                    # [DEBUG] 打印状态码
-                    print(f"📡 [DEBUG] HistRes Status: {response.status}")
-                    
                     if response.status == 200:
                         data = await response.json()
                         items = []
                         if isinstance(data, dict):
                             if "historicalStockList" in data: items = data["historicalStockList"]
                             elif "symbol" in data and "historical" in data: items = [data]
-                            elif "Error Message" in data: # FMP 有时候返回 200 但内容是 Error
-                                print(f"❌ [ERROR] HistRes Content Error: {data}")
+                            elif "Error Message" in data:
+                                print(f"❌ [ERROR] FMP API Error: {data}")
                         elif isinstance(data, list): items = data
                         
-                        if not items:
-                            print(f"⚠️ [WARN] HistRes Empty Items. Data: {str(data)[:200]}")
+                        if not items and len(data) > 0:
+                             print(f"⚠️ [WARN] HistRes Structure Unknown: {str(data)[:100]}")
 
                         for item in items:
                             sym = item.get('symbol')
@@ -265,11 +271,9 @@ async def fetch_historical_batch(symbols: list, days=None):
                             df = await asyncio.to_thread(process_dataframe_sync, hist)
                             if df is not None: results[sym] = df
                     else:
-                        # [DEBUG] 打印错误详情
                         error_text = await response.text()
-                        print(f"❌ [ERROR] HistRes Failed: {error_text}")
+                        print(f"❌ [ERROR] HistRes Status {response.status}: {error_text}")
             except Exception as e:
-                 # [DEBUG] 打印异常堆栈
                  print(f"❌ [EXCEPTION] HistReq: {e}")
     return results
 
@@ -284,14 +288,8 @@ async def fetch_realtime_quotes(symbols: list):
             symbols_str = ",".join(chunk)
             url = f"https://financialmodelingprep.com/stable/quote?symbol={symbols_str}&apikey={FMP_API_KEY}"
             
-            # [DEBUG]
-            print(f"🔎 [DEBUG] QuoteReq: {symbols_str}")
-
             try:
                 async with session.get(url) as response:
-                    # [DEBUG]
-                    print(f"📡 [DEBUG] QuoteRes Status: {response.status}")
-
                     if response.status == 200:
                         data = await response.json()
                         if isinstance(data, list):
@@ -299,7 +297,7 @@ async def fetch_realtime_quotes(symbols: list):
                                 sym = item.get('symbol')
                                 if sym: quotes_map[sym] = item
                         else:
-                             print(f"⚠️ [WARN] QuoteRes Not List: {str(data)[:200]}")
+                             print(f"⚠️ [WARN] QuoteRes Not List: {str(data)[:100]}")
                     else:
                         error_text = await response.text()
                         print(f"❌ [ERROR] QuoteRes Failed: {error_text}")
@@ -368,7 +366,7 @@ def check_signals_sync(df):
     if abs((curr['close'] - prev['close']) / prev['close']) > CONFIG["filter"]["max_day_change"]: return False, "", "RISK_FILTER", [], []
     if curr['RSI'] > CONFIG["filter"]["max_rsi"]: return False, "", "RISK_FILTER", [], []
 
-    # --- 量能预估 (Fix Image 1: 早盘特殊阈值) ---
+    # --- 量能预估 ---
     ny_now = datetime.now(MARKET_TIMEZONE)
     market_open = ny_now.replace(hour=9, minute=30, second=0, microsecond=0)
     minutes_elapsed = (ny_now - market_open).total_seconds() / 60
@@ -379,7 +377,6 @@ def check_signals_sync(df):
         safe_minutes = max(minutes_elapsed, 20) 
         projection_factor = 390 / safe_minutes
         
-        # [Fix Image 1] 9:30-10:00 使用 2.8 的高阈值，其他时间使用 1.8
         hour = ny_now.hour
         minute = ny_now.minute
         
@@ -395,8 +392,7 @@ def check_signals_sync(df):
         
     is_heavy_volume = proj_vol > curr['Vol_MA20'] * vol_threshold
 
-    # --- 策略 1: 布林带挤压突破 (Fix Image 1: 绝对值) ---
-    # 改为 BB_Width < 0.06 (绝对值过滤)，大幅减少震荡市的假突破
+    # --- 策略 1: 布林带挤压突破 ---
     if curr['BB_Width'] < 0.06: 
         if curr['close'] > curr['BB_Up'] and is_heavy_volume:
             triggers.append(f"🚀 **BB Squeeze**: 布林带极致收口(<0.06)放量突破")
@@ -411,7 +407,7 @@ def check_signals_sync(df):
         triggers.append(f"👑 **Nx 二次起爆**: 蓝梯回踩确认 + 放量启动")
         level = "GOD_TIER"
 
-    # [Fix Image 1] 旗形突破: 强调放量
+    # 旗形突破
     pattern_name, res_line, sup_line = identify_patterns(df)
     if pattern_name and is_heavy_volume:
         triggers.append(pattern_name)
@@ -437,11 +433,10 @@ def check_signals_sync(df):
                 triggers.append(f"🛡️ **Cd 结构底背离**: 价格新低动能衰竭")
                 if level not in ["GOD_TIER", "S_TIER", "A_TIER"]: level = "B_TIER"
 
-    # --- 策略 4: 抛售高潮 (Fix Image 1: 市值过滤) ---
+    # --- 策略 4: 抛售高潮 ---
     pinbar_ratio = (curr['close'] - curr['low']) / (curr['high'] - curr['low'] + 1e-9)
-    market_cap = df.attrs.get('marketCap', float('inf')) # 默认为大盘股(inf)以策安全
+    market_cap = df.attrs.get('marketCap', float('inf')) 
     
-    # 仅允许 50 亿市值以下的小盘股触发 V 反，大盘股不做
     if curr['low'] < curr['BB_Low']:
         if proj_vol > curr['Vol_MA20'] * 2.5:
             if pinbar_ratio > 0.5:
@@ -459,7 +454,6 @@ async def check_signals(df):
     return await asyncio.to_thread(check_signals_sync, df)
 
 def _generate_chart_sync(df, ticker, res_line=[], sup_line=[]):
-    # [Fix Image 2] 使用 BytesIO 内存流，完全不写入硬盘
     buf = io.BytesIO()
     
     last_close = df['close'].iloc[-1]
@@ -550,8 +544,16 @@ class StockBotClient(discord.Client):
     async def on_ready(self):
         load_settings()
         print(f'Logged in as {self.user}')
-        self.alert_channel = self.get_channel(ALERT_CHANNEL_ID)
-        self.monitor_stocks.start()
+        if ALERT_CHANNEL_ID != 0:
+            self.alert_channel = self.get_channel(ALERT_CHANNEL_ID)
+            if self.alert_channel is None:
+                print(f"❌ [ERROR] Could not find channel with ID {ALERT_CHANNEL_ID}")
+        else:
+            print("⚠️ [WARN] No ALERT_CHANNEL_ID provided in env.")
+            
+        # 确保 Loop 只启动一次
+        if not self.monitor_stocks.is_running():
+            self.monitor_stocks.start()
         await self.tree.sync()
 
     @tasks.loop(minutes=5)
@@ -560,6 +562,7 @@ class StockBotClient(discord.Client):
         now_et = datetime.now(MARKET_TIMEZONE)
         curr_time, today_str = now_et.time(), now_et.strftime('%Y-%m-%d')
         
+        # [逻辑] 盘前只报一次，盘中持续监控
         is_pre = TIME_PRE_MARKET_START <= curr_time < TIME_MARKET_OPEN
         is_open = TIME_MARKET_OPEN <= curr_time <= TIME_MARKET_CLOSE
         if not (is_pre or is_open): return
@@ -608,28 +611,26 @@ class StockBotClient(discord.Client):
             
             if all_alerted: continue
 
-            # [Fix Image 1] 冷却逻辑优化: 72小时冷却，但允许更高级别触发
+            # 冷却逻辑
             history = settings.get("signal_history", {})
             in_cooldown = False
             cooldown_days = CONFIG["system"]["cooldown_days"]
             
             last_signal_level = None
             
-            for i in range(0, cooldown_days + 1): # 检查今天和过去3天
+            for i in range(0, cooldown_days + 1): 
                 past_date = (datetime.now() - timedelta(days=i)).strftime("%Y-%m-%d")
                 if past_date in history and ticker in history[past_date]:
                     last_signal_level = history[past_date][ticker]["level"]
-                    # 如果之前触发过，我们记录下来，下面比较优先级
                     in_cooldown = True 
                     
             is_triggered, reason, level, res_line, sup_line = await check_signals(df)
             
             if in_cooldown and last_signal_level:
-                # 只有当 新信号优先级 > 旧信号优先级 时才放行
                 current_prio = CONFIG["priority"].get(level, 0)
                 last_prio = CONFIG["priority"].get(last_signal_level, 0)
                 if current_prio <= last_prio:
-                    continue # 被冷却屏蔽
+                    continue 
 
             if is_triggered:
                 price = df['close'].iloc[-1]
@@ -681,8 +682,8 @@ class StockBotClient(discord.Client):
                 mentions = " ".join([f"<@{uid}>" for uid in users])
                 emoji = CONFIG["emoji"].get(level, "🚨")
                 
+                # [Fix] 发送逻辑：增加延迟防止 429 Rate Limit
                 if sent_charts < max_charts:
-                    # [Fix Image 2] 接收 BytesIO 对象并直接发送，不存文件
                     chart_buf = await generate_chart(alert["df"], ticker, alert["res_line"], alert["sup_line"])
                     msg = (
                         f"{mentions}\n【{emoji} {level} 信号】\n"
@@ -694,15 +695,17 @@ class StockBotClient(discord.Client):
                         file = discord.File(chart_buf, filename=f"{ticker}.png")
                         await self.alert_channel.send(content=msg, file=file)
                         sent_charts += 1
-                    except Exception as e: print(e)
+                        await asyncio.sleep(1.5) # [Critical] 防止 API Rate Limit
+                    except Exception as e: print(f"❌ Send Error: {e}")
                     finally:
-                        chart_buf.close() # 释放内存
+                        chart_buf.close() 
                 else:
                     summary_list.append(f"{emoji} **{ticker}** ({level})")
 
             if summary_list:
                 summary_msg = f"📋 **其他触发信号 (简报)**:\n" + " | ".join(summary_list)
-                try: await self.alert_channel.send(content=summary_msg)
+                try: 
+                    await self.alert_channel.send(content=summary_msg)
                 except: pass
             
             save_settings()
@@ -827,7 +830,6 @@ async def test_command(interaction: discord.Interaction, ticker: str):
     quotes_map = await fetch_realtime_quotes([ticker])
     
     if not data_map or ticker not in data_map:
-        # [DEBUG] 打印失败原因
         print(f"⚠️ [TEST] Fail: data_map empty or key missing. Keys: {list(data_map.keys())} Target: {ticker}")
         await interaction.followup.send(f"❌ 失败 `{ticker}`")
         return
@@ -843,7 +845,6 @@ async def test_command(interaction: discord.Interaction, ticker: str):
     atr_val = df['ATR'].iloc[-1] if 'ATR' in df.columns else (price * 0.05)
     stop_loss = price - (2 * atr_val)
 
-    # 即使没触发信号，test命令也强制画图，方便观察
     if not reason: reason = "手动测试 (无信号)"
     
     chart_buf = await generate_chart(df, ticker, r_l, s_l)
