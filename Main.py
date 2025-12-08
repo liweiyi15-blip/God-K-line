@@ -175,21 +175,15 @@ def process_dataframe_sync(hist_data):
     if not hist_data: return None
     df = pd.DataFrame(hist_data)
     if 'date' not in df.columns: return None
-    # 历史数据通常是 Naive Date (YYYY-MM-DD)，保持 Naive 以便和后续处理兼容
     df['date'] = pd.to_datetime(df['date'])
     df = df.set_index('date').sort_index(ascending=True)
     return calculate_nx_indicators(df)
 
 def merge_and_recalc_sync(df, quote):
-    """
-    将实时Quote缝合到历史DataFrame中，并重新计算指标
-    """
     if df is None or quote is None: return df
-    
     try:
-        # 将时区 Aware 的实时时间转为 Naive，防止索引类型冲突
         quote_time = pd.to_datetime(quote['timestamp'], unit='s').tz_localize('UTC').tz_convert(MARKET_TIMEZONE)
-        quote_date = quote_time.normalize().tz_localize(None) # 移除时区信息，只保留日期
+        quote_date = quote_time.normalize().tz_localize(None) 
         
         last_idx = df.index[-1]
         last_date = pd.to_datetime(last_idx).normalize()
@@ -206,7 +200,7 @@ def merge_and_recalc_sync(df, quote):
             'low': safe_low,
             'close': current_price,
             'volume': quote['volume'],
-            'date': quote_date # 使用 Naive Date
+            'date': quote_date 
         }
         
         df_mod = df.copy()
@@ -219,7 +213,6 @@ def merge_and_recalc_sync(df, quote):
             new_df = new_df.set_index('date')
             df_mod = pd.concat([df_mod, new_df])
         
-        # 注入市值数据供策略使用
         if 'marketCap' in quote:
             df_mod.attrs['marketCap'] = quote['marketCap']
             
@@ -231,7 +224,7 @@ def merge_and_recalc_sync(df, quote):
 
 async def fetch_historical_batch(symbols: list, days=None):
     """
-    [Updated] 使用并发单股查询
+    [Updated] 双重URL策略 + 浏览器伪装，解决空数据问题
     """
     if not symbols: return {}
     if days is None: days = CONFIG["system"]["history_days"]
@@ -243,17 +236,25 @@ async def fetch_historical_batch(symbols: list, days=None):
     
     semaphore = asyncio.Semaphore(10)
     
+    # 极强伪装：完全模拟 Chrome 浏览器
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-        "Accept": "application/json"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+        "Upgrade-Insecure-Requests": "1"
     }
 
     async def fetch_single(session, sym):
-        url = f"https://financialmodelingprep.com/stable/historical-price-eod/full?symbol={sym}&from={from_date}&to={to_date}&apikey={FMP_API_KEY}"
+        # 策略A: 用户验证过的 Query 参数格式
+        url_a = f"https://financialmodelingprep.com/stable/historical-price-eod/full?symbol={sym}&from={from_date}&to={to_date}&apikey={FMP_API_KEY}"
+        
         async with semaphore:
+            success = False
+            # 尝试 URL A
             try:
-                # print(f"🔎 [DEBUG] HistReq: {sym}") # 减少日志
-                async with session.get(url, ssl=False) as response:
+                async with session.get(url_a, ssl=False) as response:
                     if response.status == 200:
                         data = await response.json()
                         items = []
@@ -262,15 +263,43 @@ async def fetch_historical_batch(symbols: list, days=None):
                             elif "symbol" in data and "historical" in data: items = [data]
                         elif isinstance(data, list): items = data
                         
-                        for item in items:
-                            hist = item.get('historical', [])
-                            if hist:
-                                df = await asyncio.to_thread(process_dataframe_sync, hist)
-                                if df is not None: results[sym] = df
-                    else:
-                        print(f"❌ [ERROR] Hist {sym} Status: {response.status}")
+                        if items:
+                            success = True
+                            for item in items:
+                                hist = item.get('historical', [])
+                                if hist:
+                                    df = await asyncio.to_thread(process_dataframe_sync, hist)
+                                    if df is not None: results[sym] = df
+                        else:
+                             # 如果为空，打印一下原始内容方便最后确认
+                             print(f"⚠️ [WARN] {sym} Query格式返回空，尝试Path格式...")
             except Exception as e:
-                print(f"❌ [EXCEPTION] Hist {sym}: {e}")
+                print(f"❌ [Strategy A Error] {sym}: {e}")
+
+            # 策略B (Failover): 如果 A 失败或为空，尝试 Path 参数格式
+            # 这是 FMP 的另一种标准格式，常用于解决参数解析问题
+            if not success:
+                url_b = f"https://financialmodelingprep.com/stable/historical-price-eod/full/{sym}?from={from_date}&to={to_date}&apikey={FMP_API_KEY}"
+                try:
+                    async with session.get(url_b, ssl=False) as response_b:
+                        if response_b.status == 200:
+                            data_b = await response_b.json()
+                            items_b = []
+                            # Path 格式通常直接返回包含 symbol 的字典
+                            if isinstance(data_b, dict) and "historical" in data_b: items_b = [data_b]
+                            elif isinstance(data_b, list): items_b = data_b
+                            
+                            if items_b:
+                                print(f"✅ [RECOVER] {sym} 使用 Path 格式获取成功")
+                                for item in items_b:
+                                    hist = item.get('historical', [])
+                                    if hist:
+                                        df = await asyncio.to_thread(process_dataframe_sync, hist)
+                                        if df is not None: results[sym] = df
+                            else:
+                                print(f"🔥 [FATAL] {sym} 两种格式均无数据. Raw B: {str(data_b)[:100]}")
+                except Exception as e:
+                     print(f"❌ [Strategy B Error] {sym}: {e}")
 
     async with aiohttp.ClientSession(headers=headers) as session:
         tasks_list = [fetch_single(session, sym) for sym in symbols]
@@ -280,23 +309,22 @@ async def fetch_historical_batch(symbols: list, days=None):
 
 async def fetch_realtime_quotes(symbols: list):
     """
-    [Updated] 使用并发单股查询获取实时报价，不再使用批量
+    [Updated] 同样使用并发单股查询 + 强伪装
     """
     if not symbols: return {}
     
     quotes_map = {}
-    semaphore = asyncio.Semaphore(10) # 限制并发
+    semaphore = asyncio.Semaphore(10)
 
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "application/json"
     }
     
     async def fetch_single_quote(session, sym):
-        # 强制单股 URL 格式
         url = f"https://financialmodelingprep.com/stable/quote?symbol={sym}&apikey={FMP_API_KEY}"
         async with semaphore:
             try:
-                # print(f"🔎 [DEBUG] QuoteReq: {sym}")
                 async with session.get(url, ssl=False) as response:
                     if response.status == 200:
                         data = await response.json()
@@ -304,7 +332,6 @@ async def fetch_realtime_quotes(symbols: list):
                             for item in data:
                                 s = item.get('symbol')
                                 if s: quotes_map[s] = item
-                        # FMP 单股有时返回 dict 或包含在 list 里，这里做个兼容
                         elif isinstance(data, dict):
                              s = data.get('symbol')
                              if s: quotes_map[s] = data
@@ -523,7 +550,6 @@ async def update_stats_data():
             need_20d = data.get("ret_20d") is None and (today - signal_date).days > 20
             if need_1d or need_5d or need_20d: symbols_to_check.add(ticker)
     if not symbols_to_check: return
-    # 复用并发查询
     data_map = await fetch_historical_batch(list(symbols_to_check), days=60)
     for date_str, tickers_data in history.items():
         signal_date = datetime.strptime(date_str, "%Y-%m-%d").date()
