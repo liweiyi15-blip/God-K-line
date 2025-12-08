@@ -15,7 +15,7 @@ import aiohttp
 import io
 import matplotlib
 
-# --- [Fix] 强制使用非交互式后端，防止Docker/Railway崩溃 ---
+# --- 强制使用非交互式后端，防止Docker/Railway崩溃 ---
 matplotlib.use('Agg')
 import mplfinance as mpf
 
@@ -34,7 +34,7 @@ except (TypeError, ValueError):
 # --- 全局配置 ---
 MARKET_TIMEZONE = pytz.timezone('America/New_York')
 
-# [Fix] 适配 Railway Volume 路径
+# 适配 Railway Volume 路径
 SETTINGS_FILE = "/app/data/settings.json"
 if not os.path.exists("/app/data"):
     # 本地开发回退路径
@@ -175,7 +175,7 @@ def process_dataframe_sync(hist_data):
     if not hist_data: return None
     df = pd.DataFrame(hist_data)
     if 'date' not in df.columns: return None
-    # [Fix] 历史数据通常是 Naive Date (YYYY-MM-DD)，保持 Naive 以便和后续处理兼容
+    # 历史数据通常是 Naive Date (YYYY-MM-DD)，保持 Naive 以便和后续处理兼容
     df['date'] = pd.to_datetime(df['date'])
     df = df.set_index('date').sort_index(ascending=True)
     return calculate_nx_indicators(df)
@@ -187,12 +187,11 @@ def merge_and_recalc_sync(df, quote):
     if df is None or quote is None: return df
     
     try:
-        # [Fix] 致命错误修复：将时区 Aware 的实时时间转为 Naive，防止索引类型冲突
+        # 将时区 Aware 的实时时间转为 Naive，防止索引类型冲突
         quote_time = pd.to_datetime(quote['timestamp'], unit='s').tz_localize('UTC').tz_convert(MARKET_TIMEZONE)
         quote_date = quote_time.normalize().tz_localize(None) # 移除时区信息，只保留日期
         
         last_idx = df.index[-1]
-        # 确保 last_idx 也是 Naive 的 (normalize 会保留时区如果原对象有时区，所以需要 double check)
         last_date = pd.to_datetime(last_idx).normalize()
         if last_date.tzinfo is not None:
              last_date = last_date.tz_localize(None)
@@ -231,72 +230,57 @@ def merge_and_recalc_sync(df, quote):
         return df
 
 async def fetch_historical_batch(symbols: list, days=None):
+    """
+    [Updated] 使用并发单股查询代替批量查询，解决 FMP 批量返回空数据的问题
+    """
     if not symbols: return {}
     if days is None: days = CONFIG["system"]["history_days"]
     
-    chunk_size = 5 
     results = {}
     now = datetime.now()
     from_date = (now - timedelta(days=days)).strftime("%Y-%m-%d")
     to_date = now.strftime("%Y-%m-%d")
     
-    # [Fix] 模拟浏览器 Header，防止 FMP 拦截 Python 脚本
+    # 限制并发数，防止瞬间发起太多请求被 FMP 封锁 (限制同时 10 个)
+    semaphore = asyncio.Semaphore(10)
+    
+    # 模拟浏览器 Header
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
         "Accept": "application/json"
     }
-    
-    async with aiohttp.ClientSession(headers=headers) as session:
-        for i in range(0, len(symbols), chunk_size):
-            chunk = symbols[i:i + chunk_size]
-            symbols_str = ",".join(chunk)
-            
-            # https://www.merriam-webster.com/dictionary/check 策略 A: 用户指定的 Query 参数格式
-            url_a = f"https://financialmodelingprep.com/stable/historical-price-eod/full?symbol={symbols_str}&from={from_date}&to={to_date}&apikey={FMP_API_KEY}"
-            
-            print(f"🔎 [DEBUG] HistReq: {chunk} ({from_date} -> {to_date})")
-            
+
+    async def fetch_single(session, sym):
+        # 强制使用单股查询格式
+        url = f"https://financialmodelingprep.com/stable/historical-price-eod/full?symbol={sym}&from={from_date}&to={to_date}&apikey={FMP_API_KEY}"
+        async with semaphore:
             try:
-                # [Fix] 增加 ssl=False 防止 Railway/Docker 环境下的 SSL 握手失败
-                async with session.get(url_a, ssl=False) as response:
+                # print(f"🔎 [DEBUG] Req: {sym}") # 减少日志刷屏，需要调试可打开
+                async with session.get(url, ssl=False) as response:
                     if response.status == 200:
                         data = await response.json()
                         items = []
-                        
-                        # 解析逻辑
                         if isinstance(data, dict):
                             if "historicalStockList" in data: items = data["historicalStockList"]
                             elif "symbol" in data and "historical" in data: items = [data]
-                            elif "Error Message" in data:
-                                print(f"❌ [API ERROR] {data['Error Message']}")
                         elif isinstance(data, list): items = data
                         
-                        # [Fix] 如果返回为空，打印原始内容以便调试
-                        if not items:
-                            print(f"⚠️ [WARN] Empty Data. Raw Response: {str(data)[:200]}")
-                            # 策略 B: 如果是单只股票且为空，尝试标准路径格式重试
-                            if len(chunk) == 1:
-                                sym = chunk[0]
-                                url_b = f"https://financialmodelingprep.com/stable/historical-price-eod/full/{sym}?from={from_date}&to={to_date}&apikey={FMP_API_KEY}"
-                                print(f"🔄 [RETRY] Trying Path Format: {url_b}")
-                                async with session.get(url_b, ssl=False) as resp_b:
-                                    if resp_b.status == 200:
-                                        data_b = await resp_b.json()
-                                        if isinstance(data_b, dict) and "symbol" in data_b: items = [data_b]
-
                         for item in items:
-                            sym = item.get('symbol')
                             hist = item.get('historical', [])
-                            if not hist or not sym: 
-                                print(f"⚠️ [WARN] No history for {sym}. Keys: {item.keys()}")
-                                continue
-                            df = await asyncio.to_thread(process_dataframe_sync, hist)
-                            if df is not None: results[sym] = df
+                            if hist:
+                                df = await asyncio.to_thread(process_dataframe_sync, hist)
+                                if df is not None: results[sym] = df
                     else:
-                        error_text = await response.text()
-                        print(f"❌ [ERROR] Status {response.status}: {error_text}")
+                        print(f"❌ [ERROR] {sym} Status: {response.status}")
             except Exception as e:
-                 print(f"❌ [EXCEPTION] HistReq: {e}")
+                print(f"❌ [EXCEPTION] {sym}: {e}")
+
+    # 创建 session 并发起并发任务
+    async with aiohttp.ClientSession(headers=headers) as session:
+        tasks_list = [fetch_single(session, sym) for sym in symbols]
+        # 等待所有请求完成
+        await asyncio.gather(*tasks_list)
+    
     return results
 
 async def fetch_realtime_quotes(symbols: list):
@@ -304,7 +288,6 @@ async def fetch_realtime_quotes(symbols: list):
     chunk_size = 100
     quotes_map = {}
     
-    # 同样添加 Headers
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
     }
@@ -314,7 +297,6 @@ async def fetch_realtime_quotes(symbols: list):
             chunk = symbols[i:i + chunk_size]
             symbols_str = ",".join(chunk)
             
-            # https://www.merriam-webster.com/dictionary/check 严格匹配用户提供的实时报价 URL 格式
             url = f"https://financialmodelingprep.com/stable/quote?symbol={symbols_str}&apikey={FMP_API_KEY}"
             
             try:
@@ -608,7 +590,7 @@ class StockBotClient(discord.Client):
 
         if not all_tickers: return
 
-        # 1. 获取历史数据
+        # 1. 获取历史数据 (已修改为并发单股查询)
         hist_map = await fetch_historical_batch(list(all_tickers))
         
         # 2. 获取实时报价
@@ -708,7 +690,7 @@ class StockBotClient(discord.Client):
                 mentions = " ".join([f"<@{uid}>" for uid in users])
                 emoji = CONFIG["emoji"].get(level, "🚨")
                 
-                # [Fix] 发送逻辑：增加延迟防止 429 Rate Limit
+                # 发送逻辑：增加延迟防止 429 Rate Limit
                 if sent_charts < max_charts:
                     chart_buf = await generate_chart(alert["df"], ticker, alert["res_line"], alert["sup_line"])
                     msg = (
@@ -721,7 +703,7 @@ class StockBotClient(discord.Client):
                         file = discord.File(chart_buf, filename=f"{ticker}.png")
                         await self.alert_channel.send(content=msg, file=file)
                         sent_charts += 1
-                        await asyncio.sleep(1.5) # [Critical] 防止 API Rate Limit
+                        await asyncio.sleep(1.5) # 防止 API Rate Limit
                     except Exception as e: print(f"❌ Send Error: {e}")
                     finally:
                         chart_buf.close() 
