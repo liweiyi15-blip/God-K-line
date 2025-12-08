@@ -52,7 +52,7 @@ CONFIG = {
         "max_day_change": 0.15,   
         "min_vol_ratio": 1.3,     
         "intraday_vol_ratio_normal": 1.8, 
-        "intraday_vol_ratio_open": 2.8,   
+        "intraday_vol_ratio_open": 2.8,    
         "min_converge_angle": 0.05
     },
     "pattern": {
@@ -60,7 +60,7 @@ CONFIG = {
         "window": 60
     },
     "system": {
-        "cooldown_days": 3,          
+        "cooldown_days": 3,           
         "max_charts_per_scan": 5,
         "history_days": 400
     },
@@ -224,7 +224,7 @@ def merge_and_recalc_sync(df, quote):
 
 async def fetch_historical_batch(symbols: list, days=None):
     """
-    [Updated] 双重URL策略 + 浏览器伪装，解决空数据问题
+    [Debugging Version] 增加详细日志，保留用户原 URL
     """
     if not symbols: return {}
     if days is None: days = CONFIG["system"]["history_days"]
@@ -247,7 +247,7 @@ async def fetch_historical_batch(symbols: list, days=None):
     }
 
     async def fetch_single(session, sym):
-        # 策略A: 用户验证过的 Query 参数格式
+        # 策略A: 用户指定的 Query 参数格式 (historical-price-eod)
         url_a = f"https://financialmodelingprep.com/stable/historical-price-eod/full?symbol={sym}&from={from_date}&to={to_date}&apikey={FMP_API_KEY}"
         
         async with semaphore:
@@ -271,13 +271,17 @@ async def fetch_historical_batch(symbols: list, days=None):
                                     df = await asyncio.to_thread(process_dataframe_sync, hist)
                                     if df is not None: results[sym] = df
                         else:
-                             # 如果为空，打印一下原始内容方便最后确认
-                             print(f"⚠️ [WARN] {sym} Query格式返回空，尝试Path格式...")
-            except Exception as e:
-                print(f"❌ [Strategy A Error] {sym}: {e}")
+                             # 调试日志：空数据
+                             print(f"⚠️ [DEBUG] {sym} 状态200但数据为空. API返回: {str(data)[:200]}")
+                    else:
+                        # 调试日志：非200状态码
+                        error_text = await response.text()
+                        print(f"❌ [DEBUG HTTP ERROR] {sym} (Strategy A) Status: {response.status} | Content: {error_text[:200]}")
 
-            # 策略B (Failover): 如果 A 失败或为空，尝试 Path 参数格式
-            # 这是 FMP 的另一种标准格式，常用于解决参数解析问题
+            except Exception as e:
+                print(f"❌ [Strategy A Exception] {sym}: {e}")
+
+            # 策略B (Failover): Path 参数格式 (historical-price-eod)
             if not success:
                 url_b = f"https://financialmodelingprep.com/stable/historical-price-eod/full/{sym}?from={from_date}&to={to_date}&apikey={FMP_API_KEY}"
                 try:
@@ -285,7 +289,6 @@ async def fetch_historical_batch(symbols: list, days=None):
                         if response_b.status == 200:
                             data_b = await response_b.json()
                             items_b = []
-                            # Path 格式通常直接返回包含 symbol 的字典
                             if isinstance(data_b, dict) and "historical" in data_b: items_b = [data_b]
                             elif isinstance(data_b, list): items_b = data_b
                             
@@ -297,9 +300,14 @@ async def fetch_historical_batch(symbols: list, days=None):
                                         df = await asyncio.to_thread(process_dataframe_sync, hist)
                                         if df is not None: results[sym] = df
                             else:
-                                print(f"🔥 [FATAL] {sym} 两种格式均无数据. Raw B: {str(data_b)[:100]}")
+                                print(f"🔥 [FATAL] {sym} 两种格式均无数据.")
+                        else:
+                            # 调试日志：非200状态码
+                            error_text = await response_b.text()
+                            print(f"❌ [DEBUG HTTP ERROR] {sym} (Strategy B) Status: {response_b.status} | Content: {error_text[:200]}")
+
                 except Exception as e:
-                     print(f"❌ [Strategy B Error] {sym}: {e}")
+                      print(f"❌ [Strategy B Exception] {sym}: {e}")
 
     async with aiohttp.ClientSession(headers=headers) as session:
         tasks_list = [fetch_single(session, sym) for sym in symbols]
@@ -309,7 +317,7 @@ async def fetch_historical_batch(symbols: list, days=None):
 
 async def fetch_realtime_quotes(symbols: list):
     """
-    [Updated] 同样使用并发单股查询 + 强伪装
+    [Debugging Version] 增加详细日志
     """
     if not symbols: return {}
     
@@ -336,7 +344,8 @@ async def fetch_realtime_quotes(symbols: list):
                              s = data.get('symbol')
                              if s: quotes_map[s] = data
                     else:
-                        print(f"❌ [ERROR] Quote {sym} Status: {response.status}")
+                        error_text = await response.text()
+                        print(f"❌ [DEBUG QUOTE ERROR] {sym} Status: {response.status} | Content: {error_text[:200]}")
             except Exception as e:
                 print(f"❌ [EXCEPTION] Quote {sym}: {e}")
 
@@ -869,8 +878,8 @@ async def test_command(interaction: discord.Interaction, ticker: str):
     
     if not data_map or ticker not in data_map:
         # 调试信息已经由 fetch_historical_batch 打印了
-        print(f"⚠️ [TEST] Fail: data_map empty or key missing. Target: {ticker}")
-        await interaction.followup.send(f"❌ 失败 `{ticker}` (请查看后台详细日志)")
+        # 这里只返回一个通用失败提示
+        await interaction.followup.send(f"❌ 失败 `{ticker}` (请查看后台详细日志，可能被403/429拦截)")
         return
         
     df = data_map[ticker]
