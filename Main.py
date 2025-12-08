@@ -234,45 +234,67 @@ async def fetch_historical_batch(symbols: list, days=None):
     if not symbols: return {}
     if days is None: days = CONFIG["system"]["history_days"]
     
-    chunk_size = 50 
+    chunk_size = 5 
     results = {}
     now = datetime.now()
     from_date = (now - timedelta(days=days)).strftime("%Y-%m-%d")
     to_date = now.strftime("%Y-%m-%d")
     
-    async with aiohttp.ClientSession() as session:
+    # [Fix] 模拟浏览器 Header，防止 FMP 拦截 Python 脚本
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+        "Accept": "application/json"
+    }
+    
+    async with aiohttp.ClientSession(headers=headers) as session:
         for i in range(0, len(symbols), chunk_size):
             chunk = symbols[i:i + chunk_size]
             symbols_str = ",".join(chunk)
-            # [URL] 保持使用 stable 接口，添加 serietype=line 可能有助于减少某些错误，但 full 历史更稳
-            url = f"https://financialmodelingprep.com/stable/historical-price-eod/full?symbol={symbols_str}&from={from_date}&to={to_date}&apikey={FMP_API_KEY}"
             
-            print(f"🔎 [DEBUG] HistReq: {chunk[:3]}...")
+            # https://www.merriam-webster.com/dictionary/check 策略 A: 用户指定的 Query 参数格式
+            url_a = f"https://financialmodelingprep.com/stable/historical-price-eod/full?symbol={symbols_str}&from={from_date}&to={to_date}&apikey={FMP_API_KEY}"
+            
+            print(f"🔎 [DEBUG] HistReq: {chunk} ({from_date} -> {to_date})")
             
             try:
-                async with session.get(url) as response:
+                # [Fix] 增加 ssl=False 防止 Railway/Docker 环境下的 SSL 握手失败
+                async with session.get(url_a, ssl=False) as response:
                     if response.status == 200:
                         data = await response.json()
                         items = []
+                        
+                        # 解析逻辑
                         if isinstance(data, dict):
                             if "historicalStockList" in data: items = data["historicalStockList"]
                             elif "symbol" in data and "historical" in data: items = [data]
                             elif "Error Message" in data:
-                                print(f"❌ [ERROR] FMP API Error: {data}")
+                                print(f"❌ [API ERROR] {data['Error Message']}")
                         elif isinstance(data, list): items = data
                         
-                        if not items and len(data) > 0:
-                             print(f"⚠️ [WARN] HistRes Structure Unknown: {str(data)[:100]}")
+                        # [Fix] 如果返回为空，打印原始内容以便调试
+                        if not items:
+                            print(f"⚠️ [WARN] Empty Data. Raw Response: {str(data)[:200]}")
+                            # 策略 B: 如果是单只股票且为空，尝试标准路径格式重试
+                            if len(chunk) == 1:
+                                sym = chunk[0]
+                                url_b = f"https://financialmodelingprep.com/stable/historical-price-eod/full/{sym}?from={from_date}&to={to_date}&apikey={FMP_API_KEY}"
+                                print(f"🔄 [RETRY] Trying Path Format: {url_b}")
+                                async with session.get(url_b, ssl=False) as resp_b:
+                                    if resp_b.status == 200:
+                                        data_b = await resp_b.json()
+                                        if isinstance(data_b, dict) and "symbol" in data_b: items = [data_b]
 
                         for item in items:
                             sym = item.get('symbol')
                             hist = item.get('historical', [])
-                            if not hist or not sym: continue
+                            if not hist or not sym: 
+                                print(f"⚠️ [WARN] No history for {sym}. Keys: {item.keys()}")
+                                continue
                             df = await asyncio.to_thread(process_dataframe_sync, hist)
                             if df is not None: results[sym] = df
                     else:
                         error_text = await response.text()
-                        print(f"❌ [ERROR] HistRes Status {response.status}: {error_text}")
+                        print(f"❌ [ERROR] Status {response.status}: {error_text}")
             except Exception as e:
                  print(f"❌ [EXCEPTION] HistReq: {e}")
     return results
@@ -282,14 +304,21 @@ async def fetch_realtime_quotes(symbols: list):
     chunk_size = 100
     quotes_map = {}
     
-    async with aiohttp.ClientSession() as session:
+    # 同样添加 Headers
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+    }
+    
+    async with aiohttp.ClientSession(headers=headers) as session:
         for i in range(0, len(symbols), chunk_size):
             chunk = symbols[i:i + chunk_size]
             symbols_str = ",".join(chunk)
+            
+            # https://www.merriam-webster.com/dictionary/check 严格匹配用户提供的实时报价 URL 格式
             url = f"https://financialmodelingprep.com/stable/quote?symbol={symbols_str}&apikey={FMP_API_KEY}"
             
             try:
-                async with session.get(url) as response:
+                async with session.get(url, ssl=False) as response:
                     if response.status == 200:
                         data = await response.json()
                         if isinstance(data, list):
@@ -551,7 +580,6 @@ class StockBotClient(discord.Client):
         else:
             print("⚠️ [WARN] No ALERT_CHANNEL_ID provided in env.")
             
-        # 确保 Loop 只启动一次
         if not self.monitor_stocks.is_running():
             self.monitor_stocks.start()
         await self.tree.sync()
@@ -562,7 +590,6 @@ class StockBotClient(discord.Client):
         now_et = datetime.now(MARKET_TIMEZONE)
         curr_time, today_str = now_et.time(), now_et.strftime('%Y-%m-%d')
         
-        # [逻辑] 盘前只报一次，盘中持续监控
         is_pre = TIME_PRE_MARKET_START <= curr_time < TIME_MARKET_OPEN
         is_open = TIME_MARKET_OPEN <= curr_time <= TIME_MARKET_CLOSE
         if not (is_pre or is_open): return
@@ -611,7 +638,6 @@ class StockBotClient(discord.Client):
             
             if all_alerted: continue
 
-            # 冷却逻辑
             history = settings.get("signal_history", {})
             in_cooldown = False
             cooldown_days = CONFIG["system"]["cooldown_days"]
@@ -830,8 +856,9 @@ async def test_command(interaction: discord.Interaction, ticker: str):
     quotes_map = await fetch_realtime_quotes([ticker])
     
     if not data_map or ticker not in data_map:
-        print(f"⚠️ [TEST] Fail: data_map empty or key missing. Keys: {list(data_map.keys())} Target: {ticker}")
-        await interaction.followup.send(f"❌ 失败 `{ticker}`")
+        # 调试信息已经由 fetch_historical_batch 打印了
+        print(f"⚠️ [TEST] Fail: data_map empty or key missing. Target: {ticker}")
+        await interaction.followup.send(f"❌ 失败 `{ticker}` (请查看后台详细日志)")
         return
         
     df = data_map[ticker]
