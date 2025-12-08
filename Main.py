@@ -54,15 +54,15 @@ TIME_MARKET_CLOSE = time(16, 0)
 # --- 核心策略配置 ---
 CONFIG = {
     "filter": {
-        "max_60d_gain": 3.0,      
-        "max_rsi": 82,              
-        "max_bias_50": 0.45,        
-        "max_upper_shadow": 0.4,    
-        "min_adx_trend": 20,        
-        "max_day_change": 0.15,   
-        "min_vol_ratio": 1.3,     
-        "intraday_vol_ratio_normal": 1.8, 
-        "intraday_vol_ratio_open": 3.5, 
+        "max_60d_gain": 3.0,
+        "max_rsi": 82,
+        "max_bias_50": 0.45,
+        "max_upper_shadow": 0.4,
+        "min_adx_trend": 20,
+        "max_day_change": 0.15,
+        "min_vol_ratio": 1.3,
+        "intraday_vol_ratio_normal": 1.8,
+        "intraday_vol_ratio_open": 3.5,
         "min_converge_angle": 0.05
     },
     "pattern": {
@@ -70,17 +70,27 @@ CONFIG = {
         "window": 60
     },
     "system": {
-        "cooldown_days": 3,            
+        "cooldown_days": 3,
         "max_charts_per_scan": 5,
         "history_days": 400
     },
-    "emoji": {
-        "GOD_TIER": "👑", "S_TIER": "🔥", "A_TIER": "📈", 
-        "B_TIER": "💎", "C_TIER": "🚀", "RISK": "🛡️"
-    },
-    "priority": {
-        "GOD_TIER": 100, "S_TIER": 90, "A_TIER": 80, 
-        "B_TIER": 70, "C_TIER": 60, "NORMAL": 0
+    # 【修改】使用评分阈值和加权，替代原来的级别定义
+    "SCORE": { 
+        "MIN_ALERT_SCORE": 70, # 最低报警分数
+        "WEIGHTS": {
+            "GOD_TIER_NX": 40,   # Nx 趋势起爆 (最高权重)
+            "PATTERN_BREAK": 25, # 旗形突破
+            "BB_SQUEEZE": 15,    # BB 紧缩突破
+            "STRONG_ADX": 10,    # ADX > 30 趋势确认
+            "HEAVY_VOLUME": 10,  # 相对成交量 > 2.0 (额外加成)
+            "KDJ_REBOUND": 8,    # KDJ 绝地反击
+            "NX_BREAKOUT": 7,    # Nx 蓝梯突破 (普通)
+            "MACD_DIVERGE": 5,   # MACD 底背离
+            "CAPITULATION": 12   # 抛售高潮
+        },
+        "EMOJI": {
+            100: "👑", 90: "🔥", 80: "📈", 70: "💎", 60: "🚀"
+        }
     }
 }
 
@@ -130,7 +140,7 @@ def calculate_nx_indicators(df):
     for c in cols:
         df[c] = pd.to_numeric(df[c], errors='coerce')
     
-    df = df[df['close'] > 0] 
+    df = df[df['close'] > 0]
     
     # 1. Nx 均线
     df['Nx_Blue_UP'] = df['high'].ewm(span=24, adjust=False).mean()
@@ -284,6 +294,11 @@ async def fetch_historical_batch(symbols: list, days=None):
         async with semaphore:
             try:
                 async with session.get(url, ssl=False) as response:
+                    if response.status == 429:
+                        logging.warning(f"[429 Rate Limit] {sym}. Retrying in 5s...")
+                        await asyncio.sleep(5)
+                        response = await session.get(url, ssl=False)
+                        
                     if response.status == 200:
                         data = await response.json()
                         df = None
@@ -322,6 +337,11 @@ async def fetch_realtime_quotes(symbols: list):
         async with semaphore:
             try:
                 async with session.get(url, ssl=False) as response:
+                    if response.status == 429:
+                        logging.warning(f"[429 Rate Limit] Quote {sym}. Retrying in 5s...")
+                        await asyncio.sleep(5)
+                        response = await session.get(url, ssl=False)
+
                     if response.status == 200:
                         data = await response.json()
                         if isinstance(data, list):
@@ -411,27 +431,29 @@ def get_volume_projection_factor(ny_now, minutes_elapsed):
         return factor
 
 
+# 【修改】 check_signals_sync 返回 score (int) 而非 level (str)
 def check_signals_sync(df):
-    if len(df) < 60: return False, "", "NONE", [], []
+    if len(df) < 60: return False, 0, "", [], []
     curr = df.iloc[-1]
     prev = df.iloc[-2]
     triggers = []
-    level = "NORMAL"
+    score = 0
+    weights = CONFIG["SCORE"]["WEIGHTS"]
 
     low_60 = df['low'].tail(60).min()
     # 基础风控
-    if curr['close'] > low_60 * CONFIG["filter"]["max_60d_gain"]: return False, "", "RISK_FILTER", [], []
+    if curr['close'] > low_60 * CONFIG["filter"]["max_60d_gain"]: return False, 0, "RISK_FILTER", [], []
     prev_close_safe = prev['close'] if prev['close'] > 0 else 1.0
-    if abs((curr['close'] - prev['close']) / prev_close_safe) > CONFIG["filter"]["max_day_change"]: return False, "", "RISK_FILTER", [], []
-    if curr['RSI'] > CONFIG["filter"]["max_rsi"]: return False, "", "RISK_FILTER", [], []
+    if abs((curr['close'] - prev['close']) / prev_close_safe) > CONFIG["filter"]["max_day_change"]: return False, 0, "RISK_FILTER", [], []
+    if curr['RSI'] > CONFIG["filter"]["max_rsi"]: return False, 0, "RISK_FILTER", [], []
     
     # [优化] 乖离率风控
     if curr['BIAS_50'] > CONFIG["filter"]["max_bias_50"]:
-         return False, "", "RISK_OVEREXTENDED", [], []
+         return False, 0, "RISK_OVEREXTENDED", [], []
 
     # [优化] K线形态风控 (拒绝长上影线)
     if curr['Upper_Shadow_Ratio'] > CONFIG["filter"]["max_upper_shadow"]:
-        return False, "", "REJECT_WICK", [], []
+        return False, 0, "REJECT_WICK", [], []
 
     ny_now = datetime.now(MARKET_TIMEZONE)
     market_open = ny_now.replace(hour=9, minute=30, second=0, microsecond=0)
@@ -441,7 +463,6 @@ def check_signals_sync(df):
     
     if is_open_market:
         safe_minutes = max(minutes_elapsed, 1) # 至少1分钟
-        # [优化] 使用分段推算因子
         projection_factor = get_volume_projection_factor(ny_now, safe_minutes)
         vol_threshold = CONFIG["filter"]["intraday_vol_ratio_normal"] 
         
@@ -451,6 +472,10 @@ def check_signals_sync(df):
         vol_threshold = CONFIG["filter"]["min_vol_ratio"]
         
     is_heavy_volume = proj_vol > curr['Vol_MA20'] * vol_threshold
+    
+    # 【新增】基于成交量推算因子的额外加分 (更可靠的放量)
+    if is_heavy_volume and proj_vol > curr['Vol_MA20'] * 2.0:
+        score += weights["HEAVY_VOLUME"]
 
     # --- 策略部分 ---
 
@@ -459,46 +484,52 @@ def check_signals_sync(df):
         if curr['close'] > curr['BB_Up'] and is_heavy_volume:
             if curr['ADX'] > 15 and curr['PDI'] > curr['MDI']:
                 triggers.append(f"🚀 **BB Squeeze (Trend Confirm)**: 紧缩突破 + 趋势增强")
-                if level == "NORMAL": level = "S_TIER"
+                score += weights["BB_SQUEEZE"]
 
-    # 策略 2: Nx 蓝梯 (增强版: 需要强趋势)
+    # 策略 2: Nx 蓝梯 (超强趋势起爆)
     recent_10 = df.tail(10)
     had_breakout = (recent_10['close'] > recent_10['Nx_Blue_UP']).any()
-    on_support = curr['close'] > curr['Nx_Blue_DW'] and curr['low'] <= curr['Nx_Blue_UP'] * 1.02
     
-    is_strong_trend = curr['ADX'] > CONFIG["filter"]["min_adx_trend"] and curr['PDI'] > curr['MDI']
+    is_low_close_ok = curr['low'] >= curr['Nx_Blue_DW'] * 0.99 and curr['close'] >= curr['Nx_Blue_UP']
+    on_support = curr['close'] > curr['Nx_Blue_DW'] and is_low_close_ok
 
-    if had_breakout and on_support and is_heavy_volume and is_strong_trend:
-        triggers.append(f"👑 **Nx 趋势起爆**: 蓝梯回踩 + 强动能(ADX>20)")
-        level = "GOD_TIER"
+    is_adx_rising = curr['ADX'] > prev['ADX']
+    is_very_strong_trend = curr['ADX'] > 30 and curr['PDI'] > curr['MDI'] and is_adx_rising
+
+    if is_very_strong_trend:
+        # 【新增】 强 ADX 基础分
+        score += weights["STRONG_ADX"] 
+        if had_breakout and on_support and is_heavy_volume:
+            triggers.append(f"👑 **Nx 趋势起爆**: 蓝梯回踩 + 超强动能(ADX>{curr['ADX']:.1f})")
+            score += weights["GOD_TIER_NX"] # 最高权重
 
     pattern_name, res_line, sup_line = identify_patterns(df)
     if pattern_name and is_heavy_volume:
         triggers.append(pattern_name)
-        if level != "GOD_TIER": level = "S_TIER"
+        score += weights["PATTERN_BREAK"]
 
-    is_downtrend = curr['close'] < curr['Nx_Blue_DW'] 
+    # 策略 3: Nx 蓝梯普通突破
     if prev['close'] < prev['Nx_Blue_UP'] and curr['close'] > curr['Nx_Blue_UP']:
         if curr['PDI'] > curr['MDI']:
             triggers.append(f"📈 **Nx 蓝梯突破**: 趋势转多确认")
-            if level not in ["GOD_TIER", "S_TIER"]: level = "A_TIER"
+            score += weights["NX_BREAKOUT"]
 
-    # 策略 3: KDJ / MACD
+    # 策略 4: KDJ / MACD
     price_low_20 = df['close'].tail(20).min()
     price_is_low = curr['close'] <= price_low_20 * 1.02
     
     if prev['J'] < 0 and curr['J'] > 0 and curr['K'] > curr['D']:
         triggers.append(f"💎 **KDJ 绝地反击**: 极度超卖 J 值回升")
-        if level == "NORMAL": level = "B_TIER"
+        score += weights["KDJ_REBOUND"]
     
     macd_low_20 = df['MACD'].tail(20).min()
     if price_is_low and curr['MACD'] < 0:
         if curr['MACD'] > macd_low_20 * 0.8:
              if curr['DIF'] > df['DIF'].tail(20).min():
-                triggers.append(f"🛡️ **Cd 结构底背离**: 价格新低动能衰竭")
-                if level not in ["GOD_TIER", "S_TIER", "A_TIER"]: level = "B_TIER"
+                 triggers.append(f"🛡️ **Cd 结构底背离**: 价格新低动能衰竭")
+                 score += weights["MACD_DIVERGE"]
 
-    # 策略 4: 抛售高潮 (小盘股)
+    # 策略 5: 抛售高潮 (小盘股)
     pinbar_ratio = (curr['close'] - curr['low']) / (curr['high'] - curr['low'] + 1e-9)
     market_cap = df.attrs.get('marketCap', float('inf')) 
     
@@ -507,13 +538,11 @@ def check_signals_sync(df):
             if pinbar_ratio > 0.5:
                 if market_cap < 5_000_000_000:
                     triggers.append(f"🛡️ **抛售高潮 (小盘股)**: 恐慌盘涌出后 V 反")
-                    level = "A_TIER"
+                    score += weights["CAPITULATION"]
 
-    if triggers:
-        if is_downtrend and len(triggers) < 2 and level not in ["GOD_TIER", "S_TIER"]:
-            return False, "", "WEAK_SIGNAL", [], []
-        return True, "\n".join(triggers), level, res_line, sup_line
-    return False, "", "NONE", [], []
+    if score >= CONFIG["SCORE"]["MIN_ALERT_SCORE"]:
+        return True, score, "\n".join(triggers), res_line, sup_line
+    return False, 0, "NONE", [], []
 
 async def check_signals(df):
     return await asyncio.to_thread(check_signals_sync, df)
@@ -542,14 +571,15 @@ def _generate_chart_sync(df, ticker, res_line=[], sup_line=[]):
         mpf.make_addplot(plot_df['DEA'], panel=2, color='blue'),
     ]
     
-    # [优化 1] 增加 tight_layout=True 来消除边框空白
     kwargs = dict(type='candle', style=my_style, title=f"{ticker} Analysis", ylabel='Price', addplot=add_plots, volume=True, panel_ratios=(6, 2, 2), tight_layout=True, savefig=buf)
     
-    if res_line: 
-        all_lines = []
-        if res_line: all_lines.extend(res_line)
-        if sup_line: all_lines.extend(sup_line)
-        # [优化 2] 改变线颜色和宽度，使其更清晰
+    # 【优化点】确保 alines 被正确传递和合并
+    all_lines = []
+    if res_line: all_lines.extend(res_line)
+    if sup_line: all_lines.extend(sup_line)
+        
+    if all_lines:
+        # 使用不同的颜色（例如：灰色）来区分趋势线
         kwargs['alines'] = dict(alines=all_lines, colors='darkgray', linewidths=2.0, linestyle='-')
     
     try:
@@ -576,6 +606,7 @@ async def update_stats_data():
         today = datetime.now().date()
         if signal_date >= today: continue 
         for ticker, data in tickers_data.items():
+            # 【修改】历史记录中的score字段
             need_1d = data.get("ret_1d") is None
             need_5d = data.get("ret_5d") is None and (today - signal_date).days > 5
             need_20d = data.get("ret_20d") is None and (today - signal_date).days > 20
@@ -606,6 +637,14 @@ async def update_stats_data():
                     updates_made = True
             except: pass
     if updates_made: save_settings()
+
+def get_emoji_by_score(score):
+    """根据分数返回对应的最高级别emoji"""
+    if score >= 100: return CONFIG["SCORE"]["EMOJI"].get(100, "👑")
+    if score >= 90: return CONFIG["SCORE"]["EMOJI"].get(90, "🔥")
+    if score >= 80: return CONFIG["SCORE"]["EMOJI"].get(80, "📈")
+    if score >= 70: return CONFIG["SCORE"]["EMOJI"].get(70, "💎")
+    return "🚀" # 低于 70 分不发送，但在test中可能显示
 
 class StockBotClient(discord.Client):
     def __init__(self, *, intents: discord.Intents):
@@ -662,6 +701,10 @@ class StockBotClient(discord.Client):
             quotes_map = await fetch_realtime_quotes(list(all_tickers))
 
         alerts_buffer = []
+        
+        # 确保 settings["signal_history"][today_str] 存在
+        if "signal_history" not in settings: settings["signal_history"] = {}
+        if today_str not in settings["signal_history"]: settings["signal_history"][today_str] = {}
 
         for ticker, df_hist in hist_map.items():
             df = df_hist
@@ -687,24 +730,35 @@ class StockBotClient(discord.Client):
             in_cooldown = False
             cooldown_days = CONFIG["system"]["cooldown_days"]
             
-            last_signal_level = None
+            last_signal_score = 0
             
-            # [修复] 冷却逻辑: i 从 1 开始，排除今天
+            # 冷却逻辑: i 从 1 开始，排除今天
             for i in range(1, cooldown_days + 1): 
                 past_date = (now_et.date() - timedelta(days=i)).strftime("%Y-%m-%d")
                 if past_date in history and ticker in history[past_date]:
-                    last_signal_level = history[past_date][ticker]["level"]
+                    # 【修改】last_signal_score 现在是 int
+                    last_signal_score = history[past_date][ticker].get("score", 0)
                     in_cooldown = True 
             
-            is_triggered, reason, level, res_line, sup_line = await check_signals(df)
+            # 【修改】check_signals 返回 score
+            is_triggered, score, reason, res_line, sup_line = await check_signals(df)
             
-            if in_cooldown and last_signal_level:
-                current_prio = CONFIG["priority"].get(level, 0)
-                last_prio = CONFIG["priority"].get(last_signal_level, 0)
-                if current_prio <= last_prio:
-                    logging.info(f"Ticker {ticker} skipped due to cooldown ({last_signal_level}).")
-                    continue 
+            # 【优化 3】防止当日重复发送相同或更低优先级的信号
+            today_signal_data = settings["signal_history"][today_str].get(ticker)
+            if today_signal_data:
+                today_score = today_signal_data.get("score", 0)
+                # 如果今天已发送的信号分数 >= 当前分数，则跳过
+                if score <= today_score:
+                    is_triggered = False
+                    logging.info(f"Ticker {ticker} skipped because a signal with score {today_score} was already sent today.")
 
+            # 检查冷却期和升级逻辑
+            if is_triggered and in_cooldown and last_signal_score > 0:
+                # 【修改】直接比较分数
+                if score <= last_signal_score:
+                    logging.info(f"Ticker {ticker} skipped due to cooldown (Last Score: {last_signal_score}).")
+                    is_triggered = False
+            
             if is_triggered:
                 price = df['close'].iloc[-1]
                 atr_val = df['ATR'].iloc[-1] if 'ATR' in df.columns else (price * 0.05)
@@ -712,8 +766,8 @@ class StockBotClient(discord.Client):
                 
                 alert_obj = {
                     "ticker": ticker,
-                    "level": level,
-                    "priority": CONFIG["priority"].get(level, 0),
+                    "score": score, # 使用 score
+                    "priority": score, # priority = score
                     "price": price,
                     "reason": reason,
                     "support": stop_loss,
@@ -725,6 +779,7 @@ class StockBotClient(discord.Client):
                 alerts_buffer.append(alert_obj)
 
         if alerts_buffer:
+            # 【修改】使用 score 排序
             alerts_buffer.sort(key=lambda x: x["priority"], reverse=True)
             max_charts = CONFIG["system"]["max_charts_per_scan"]
             sent_charts = 0
@@ -732,33 +787,35 @@ class StockBotClient(discord.Client):
 
             for alert in alerts_buffer:
                 ticker = alert["ticker"]
-                level = alert["level"]
+                score = alert["score"]
                 users = alert["users"]
                 
-                if "signal_history" not in settings: settings["signal_history"] = {}
-                if today_str not in settings["signal_history"]: settings["signal_history"][today_str] = {}
+                # 记录或更新当日信号历史
+                current_hist = settings["signal_history"][today_str].get(ticker, {})
                 
-                if ticker not in settings["signal_history"][today_str]:
-                    settings["signal_history"][today_str][ticker] = {
-                        "level": level,
-                        "price": alert["price"],
-                        "time": now_et.strftime('%H:%M'),
-                        "reason": alert["reason"],
-                        "ret_1d": None, "ret_5d": None, "ret_20d": None
-                    }
-
+                settings["signal_history"][today_str][ticker] = {
+                    "score": score, # 记录分数
+                    "price": alert["price"],
+                    "time": now_et.strftime('%H:%M'),
+                    "reason": alert["reason"],
+                    "ret_1d": current_hist.get("ret_1d"),
+                    "ret_5d": current_hist.get("ret_5d"),
+                    "ret_20d": current_hist.get("ret_20d"),
+                }
+                
                 for uid in users:
                     status_key = f"{ticker}-{today_str}"
                     new_status = "PRE_SENT" if is_pre else ("BOTH_SENT" if users_data[uid]['daily_status'].get(status_key) == "PRE_SENT" else "MARKET_SENT")
                     users_data[uid]['daily_status'][status_key] = new_status
                 
                 mentions = " ".join([f"<@{uid}>" for uid in users])
-                emoji = CONFIG["emoji"].get(level, "🚨")
+                emoji = get_emoji_by_score(score) # 根据分数动态获取 emoji
                 
                 if sent_charts < max_charts:
+                    # 确保 res_line 和 sup_line 被正确传递
                     chart_buf = await generate_chart(alert["df"], ticker, alert["res_line"], alert["sup_line"])
                     msg = (
-                        f"{mentions}\n【{emoji} {level} 信号】\n"
+                        f"{mentions}\n【{emoji} 强度得分: **{score}**】\n"
                         f"🎯 **{ticker}** | 💰 `${alert['price']:.2f}`\n"
                         f"{'-'*20}\n{alert['reason']}\n{'-'*20}\n"
                         f"🛑 动态止损(2ATR): `${alert['support']:.2f}`"
@@ -772,7 +829,7 @@ class StockBotClient(discord.Client):
                     finally:
                         chart_buf.close() 
                 else:
-                    summary_list.append(f"{emoji} **{ticker}** ({level})")
+                    summary_list.append(f"{emoji} **{ticker}** ({score}分)")
 
             if summary_list:
                 summary_msg = f"📋 **其他触发信号 (简报)**:\n" + " | ".join(summary_list)
@@ -858,7 +915,9 @@ async def stats_command(interaction: discord.Interaction):
     recent = []
     for d in sorted(history.keys(), reverse=True):
         for t, data in history[d].items():
-            level = data.get("level", "NORMAL")
+            # 【修改】获取分数而非级别
+            score = data.get("score", 0) 
+            level_emoji = get_emoji_by_score(score) # 转化回 emoji 用于显示
             r1, r5, r20 = data.get("ret_1d"), data.get("ret_5d"), data.get("ret_20d")
             
             if r1 is not None:
@@ -872,15 +931,14 @@ async def stats_command(interaction: discord.Interaction):
                 if r20>0: stats["20d"]["w"]+=1
 
             if len(recent) < 8:
-                emoji = CONFIG["emoji"].get(level, "🔹")
                 rets = []
                 if r1: rets.append(f"1D:{r1}%")
                 if r5: rets.append(f"1W:{r5}%")
                 if r20: rets.append(f"1M:{r20}%")
                 ret_str = " | ".join(rets) if rets else "⏳"
-                recent.append(f"`{d}` {emoji} **{t}**\n╚ {ret_str}")
+                recent.append(f"`{d}` {level_emoji} **{t}** ({score}分)\n╚ {ret_str}")
 
-    embed = discord.Embed(title="📊 多周期回测统计", color=0x00BFFF)
+    embed = discord.Embed(title="📊 多周期回测统计", description="（基于信号分数）", color=0x00BFFF)
     def mk_stat(k, l):
         s = stats[k]
         if s["c"]==0: return f"{l}: 无数据"
@@ -910,7 +968,8 @@ async def test_command(interaction: discord.Interaction, ticker: str):
     if ticker in quotes_map:
         df = await asyncio.to_thread(merge_and_recalc_sync, df, quotes_map[ticker])
 
-    is_triggered, reason, level, r_l, s_l = await check_signals(df)
+    # 【修改】接收 score
+    is_triggered, score, reason, r_l, s_l = await check_signals(df)
     
     price = df['close'].iloc[-1]
     atr_val = df['ATR'].iloc[-1] if 'ATR' in df.columns else (price * 0.05)
@@ -919,7 +978,11 @@ async def test_command(interaction: discord.Interaction, ticker: str):
     if not reason: reason = "手动测试 (无信号)"
     
     chart_buf = await generate_chart(df, ticker, r_l, s_l)
-    msg = f"✅ `{ticker}` | {level}\n💰 `${price:.2f}`\n📝 {reason}\n🛑 Stop: `${stop_loss:.2f}`"
+    
+    emoji = get_emoji_by_score(score) # 获取 emoji
+    
+    # 【修改】使用分数显示
+    msg = f"✅ `{ticker}` | 强度得分: **{score}** {emoji}\n💰 `${price:.2f}`\n📝 {reason}\n🛑 Stop: `${stop_loss:.2f}`"
     try:
         f = discord.File(chart_buf, filename=f"{ticker}_test.png")
         await interaction.followup.send(content=msg, file=f)
