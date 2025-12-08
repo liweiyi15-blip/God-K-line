@@ -231,7 +231,7 @@ def merge_and_recalc_sync(df, quote):
 
 async def fetch_historical_batch(symbols: list, days=None):
     """
-    [Updated] 使用并发单股查询代替批量查询，解决 FMP 批量返回空数据的问题
+    [Updated] 使用并发单股查询
     """
     if not symbols: return {}
     if days is None: days = CONFIG["system"]["history_days"]
@@ -241,21 +241,18 @@ async def fetch_historical_batch(symbols: list, days=None):
     from_date = (now - timedelta(days=days)).strftime("%Y-%m-%d")
     to_date = now.strftime("%Y-%m-%d")
     
-    # 限制并发数，防止瞬间发起太多请求被 FMP 封锁 (限制同时 10 个)
     semaphore = asyncio.Semaphore(10)
     
-    # 模拟浏览器 Header
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
         "Accept": "application/json"
     }
 
     async def fetch_single(session, sym):
-        # 强制使用单股查询格式
         url = f"https://financialmodelingprep.com/stable/historical-price-eod/full?symbol={sym}&from={from_date}&to={to_date}&apikey={FMP_API_KEY}"
         async with semaphore:
             try:
-                # print(f"🔎 [DEBUG] Req: {sym}") # 减少日志刷屏，需要调试可打开
+                # print(f"🔎 [DEBUG] HistReq: {sym}") # 减少日志
                 async with session.get(url, ssl=False) as response:
                     if response.status == 200:
                         data = await response.json()
@@ -271,49 +268,55 @@ async def fetch_historical_batch(symbols: list, days=None):
                                 df = await asyncio.to_thread(process_dataframe_sync, hist)
                                 if df is not None: results[sym] = df
                     else:
-                        print(f"❌ [ERROR] {sym} Status: {response.status}")
+                        print(f"❌ [ERROR] Hist {sym} Status: {response.status}")
             except Exception as e:
-                print(f"❌ [EXCEPTION] {sym}: {e}")
+                print(f"❌ [EXCEPTION] Hist {sym}: {e}")
 
-    # 创建 session 并发起并发任务
     async with aiohttp.ClientSession(headers=headers) as session:
         tasks_list = [fetch_single(session, sym) for sym in symbols]
-        # 等待所有请求完成
         await asyncio.gather(*tasks_list)
     
     return results
 
 async def fetch_realtime_quotes(symbols: list):
+    """
+    [Updated] 使用并发单股查询获取实时报价，不再使用批量
+    """
     if not symbols: return {}
-    chunk_size = 100
-    quotes_map = {}
     
+    quotes_map = {}
+    semaphore = asyncio.Semaphore(10) # 限制并发
+
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
     }
     
-    async with aiohttp.ClientSession(headers=headers) as session:
-        for i in range(0, len(symbols), chunk_size):
-            chunk = symbols[i:i + chunk_size]
-            symbols_str = ",".join(chunk)
-            
-            url = f"https://financialmodelingprep.com/stable/quote?symbol={symbols_str}&apikey={FMP_API_KEY}"
-            
+    async def fetch_single_quote(session, sym):
+        # 强制单股 URL 格式
+        url = f"https://financialmodelingprep.com/stable/quote?symbol={sym}&apikey={FMP_API_KEY}"
+        async with semaphore:
             try:
+                # print(f"🔎 [DEBUG] QuoteReq: {sym}")
                 async with session.get(url, ssl=False) as response:
                     if response.status == 200:
                         data = await response.json()
                         if isinstance(data, list):
                             for item in data:
-                                sym = item.get('symbol')
-                                if sym: quotes_map[sym] = item
-                        else:
-                             print(f"⚠️ [WARN] QuoteRes Not List: {str(data)[:100]}")
+                                s = item.get('symbol')
+                                if s: quotes_map[s] = item
+                        # FMP 单股有时返回 dict 或包含在 list 里，这里做个兼容
+                        elif isinstance(data, dict):
+                             s = data.get('symbol')
+                             if s: quotes_map[s] = data
                     else:
-                        error_text = await response.text()
-                        print(f"❌ [ERROR] QuoteRes Failed: {error_text}")
+                        print(f"❌ [ERROR] Quote {sym} Status: {response.status}")
             except Exception as e:
-                print(f"❌ [EXCEPTION] QuoteReq: {e}")
+                print(f"❌ [EXCEPTION] Quote {sym}: {e}")
+
+    async with aiohttp.ClientSession(headers=headers) as session:
+        tasks_list = [fetch_single_quote(session, sym) for sym in symbols]
+        await asyncio.gather(*tasks_list)
+
     return quotes_map
 
 def linreg_trend(points, min_r2):
@@ -520,6 +523,7 @@ async def update_stats_data():
             need_20d = data.get("ret_20d") is None and (today - signal_date).days > 20
             if need_1d or need_5d or need_20d: symbols_to_check.add(ticker)
     if not symbols_to_check: return
+    # 复用并发查询
     data_map = await fetch_historical_batch(list(symbols_to_check), days=60)
     for date_str, tickers_data in history.items():
         signal_date = datetime.strptime(date_str, "%Y-%m-%d").date()
@@ -590,10 +594,10 @@ class StockBotClient(discord.Client):
 
         if not all_tickers: return
 
-        # 1. 获取历史数据 (已修改为并发单股查询)
+        # 1. 获取历史数据 (并发单股)
         hist_map = await fetch_historical_batch(list(all_tickers))
         
-        # 2. 获取实时报价
+        # 2. 获取实时报价 (并发单股)
         quotes_map = {}
         if is_open:
             quotes_map = await fetch_realtime_quotes(list(all_tickers))
@@ -833,7 +837,7 @@ async def test_command(interaction: discord.Interaction, ticker: str):
     await interaction.response.defer()
     ticker = ticker.upper().strip()
     
-    # 获取历史 + 实时
+    # 获取历史 + 实时 (复用并发函数)
     data_map = await fetch_historical_batch([ticker])
     quotes_map = await fetch_realtime_quotes([ticker])
     
