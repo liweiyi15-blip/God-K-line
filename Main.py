@@ -108,24 +108,31 @@ async def fetch_historical_batch(symbols: list, days=400):
     now = datetime.now()
     from_date = (now - timedelta(days=days)).strftime("%Y-%m-%d")
     to_date = now.strftime("%Y-%m-%d")
+    
+    # 简单的 Debug 打印，检查 Key 是否读取成功
+    if not FMP_API_KEY:
+        print("⚠️ [SYSTEM ERROR] FMP_API_KEY environment variable is missing!")
+        return {}
 
     async with aiohttp.ClientSession() as session:
         for i in range(0, len(symbols), chunk_size):
             chunk = symbols[i:i + chunk_size]
             symbols_str = ",".join(chunk)
-            # 使用 stable 接口 (v3)
             url = f"https://financialmodelingprep.com/api/v3/historical-price-full/{symbols_str}?from={from_date}&to={to_date}&apikey={FMP_API_KEY}"
             try:
                 async with session.get(url) as response:
                     if response.status == 200:
                         data = await response.json()
                         if isinstance(data, dict):
-                            if "Error Message" in data: continue
+                            if "Error Message" in data:
+                                print(f"⚠️ [API ERROR] API returned error: {data['Error Message']}")
+                                continue
                             if "historicalStockList" in data: items = data["historicalStockList"]
                             elif "symbol" in data and "historical" in data: items = [data]
                             else: items = []
                         elif isinstance(data, list): items = data
                         else: items = []
+                        
                         for item in items:
                             sym = item.get('symbol')
                             hist = item.get('historical', [])
@@ -136,17 +143,21 @@ async def fetch_historical_batch(symbols: list, days=400):
                             df = df.set_index('date').sort_index(ascending=True)
                             df = calculate_nx_indicators(df)
                             results[sym] = df
-            except Exception as e: print(f"Error: {e}")
+                    else:
+                        # 打印具体的 HTTP 错误码和内容，方便调试
+                        err_text = await response.text()
+                        masked_url = url.replace(FMP_API_KEY, "***")
+                        print(f"⚠️ [API ERROR] Status: {response.status} | URL: {masked_url} | Response: {err_text}")
+            except Exception as e: 
+                print(f"⚠️ [EXCEPTION] Fetch Error: {e}")
     return results
 
 def calculate_nx_indicators(df):
-    # 均线系统
     df['Nx_Blue_UP'] = df['high'].ewm(span=24, adjust=False).mean()
     df['Nx_Blue_DW'] = df['low'].ewm(span=23, adjust=False).mean()
     df['Nx_Yellow_UP'] = df['high'].ewm(span=89, adjust=False).mean()
     df['Nx_Yellow_DW'] = df['low'].ewm(span=90, adjust=False).mean()
     
-    # MACD
     price_col = 'close'
     exp12 = df[price_col].ewm(span=12, adjust=False).mean()
     exp26 = df[price_col].ewm(span=26, adjust=False).mean()
@@ -154,17 +165,14 @@ def calculate_nx_indicators(df):
     df['DEA'] = df['DIF'].ewm(span=9, adjust=False).mean()
     df['MACD'] = (df['DIF'] - df['DEA']) * 2
     
-    # RSI
     delta = df[price_col].diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
     rs = gain / loss
     df['RSI'] = 100 - (100 / (1 + rs))
     
-    # 成交量均线
     df['Vol_MA20'] = df['volume'].rolling(window=20).mean()
     
-    # ATR (Average True Range) - 用于止损计算
     df['tr1'] = df['high'] - df['low']
     df['tr2'] = abs(df['high'] - df['close'].shift(1))
     df['tr3'] = abs(df['low'] - df['close'].shift(1))
@@ -208,7 +216,6 @@ def identify_patterns(df):
                 resistance_today = slope_res * curr_idx + int_res
                 curr_close = recent['close'].iloc[-1]
                 
-                # 成交量判定将在 check_signals 统一处理
                 prev_idx = recent.index[-2]
                 res_prev = slope_res * prev_idx + int_res
                 prev_close = recent['close'].iloc[-2]
@@ -229,16 +236,11 @@ def check_signals(df):
     triggers = []
     level = "NORMAL"
 
-    # --- 0. 基础过滤 ---
     low_60 = df['low'].tail(60).min()
-    # 移除过于严格的60日涨幅限制，改为动量判断：如果60天涨了3倍以上，暂时不推
     if curr['close'] > low_60 * CONFIG["filter"]["max_60d_gain"]: return False, "", "RISK_FILTER", [], []
-    # 限制单日暴涨
     if abs((curr['close'] - prev['close']) / prev['close']) > CONFIG["filter"]["max_day_change"]: return False, "", "RISK_FILTER", [], []
-    # RSI 极度超买过滤
     if curr['RSI'] > CONFIG["filter"]["max_rsi"]: return False, "", "RISK_FILTER", [], []
 
-    # --- 1. 成交量推算 (关键优化) ---
     ny_now = datetime.now(MARKET_TIMEZONE)
     market_open = ny_now.replace(hour=9, minute=30, second=0, microsecond=0)
     minutes_elapsed = (ny_now - market_open).total_seconds() / 60
@@ -246,20 +248,15 @@ def check_signals(df):
     is_open_market = 0 < minutes_elapsed < 390
     
     if is_open_market:
-        # 盘中：简单推算，前30分钟给予一定缓冲，防止开盘脉冲
         projection_factor = 390 / max(minutes_elapsed, 20) 
         proj_vol = curr['volume'] * projection_factor
-        vol_threshold = CONFIG["filter"]["intraday_vol_ratio"] # 盘中要求更高 (1.8倍)
+        vol_threshold = CONFIG["filter"]["intraday_vol_ratio"]
     else:
-        # 盘后或盘前：直接用实际量
         proj_vol = curr['volume']
-        vol_threshold = CONFIG["filter"]["min_vol_ratio"] # 收盘要求 (1.3倍)
+        vol_threshold = CONFIG["filter"]["min_vol_ratio"]
         
     is_heavy_volume = proj_vol > curr['Vol_MA20'] * vol_threshold
 
-    # --- 2. 信号逻辑 ---
-    
-    # 逻辑 A: Nx 蓝梯回踩/突破 (趋势)
     recent_10 = df.tail(10)
     had_breakout = (recent_10['close'] > recent_10['Nx_Blue_UP']).any()
     on_support = curr['close'] > curr['Nx_Blue_DW'] and curr['low'] <= curr['Nx_Blue_UP'] * 1.02
@@ -268,34 +265,27 @@ def check_signals(df):
         triggers.append(f"👑 **二次起爆**: 蓝梯回踩确认 + 放量启动")
         level = "GOD_TIER"
 
-    # 逻辑 B: 形态突破
     pattern_name, res_line, sup_line = identify_patterns(df)
     if pattern_name:
-        # 形态突破也需要放量验证
         if is_heavy_volume:
             triggers.append(pattern_name)
             if level != "GOD_TIER": level = "S_TIER"
 
-    # 逻辑 C: 趋势转多
     is_downtrend = curr['close'] < curr['Nx_Blue_DW'] 
     if prev['close'] < prev['Nx_Blue_UP'] and curr['close'] > curr['Nx_Blue_UP']:
         triggers.append(f"📈 **Nx 蓝梯突破**: 趋势转多确认")
         if level not in ["GOD_TIER", "S_TIER"]: level = "A_TIER"
 
-    # 逻辑 D: 结构底背离 (优化版)
     low_20 = df['low'].tail(20).min()
     price_is_low = curr['low'] <= low_20 * 1.02
     dif_20_min = df['DIF'].tail(20).min()
-    
-    # 严格背离：价格新低，DIF抬高，且MACD柱子正在变长(动能增强)
     divergence = (curr['DIF'] > dif_20_min) and (curr['MACD'] > prev['MACD'])
     
     if price_is_low and divergence:
-        if is_downtrend or curr['RSI'] < 40: # 只在低位看背离
+        if is_downtrend or curr['RSI'] < 40:
              triggers.append(f"💎 **Cd 结构底背离**: 底部反转信号")
              if level not in ["GOD_TIER", "S_TIER", "A_TIER"]: level = "B_TIER"
 
-    # 逻辑 E: RSI 金叉
     if prev['RSI'] < 30 and curr['RSI'] > 30:
         triggers.append(f"🚀 **RSI 弘历战法**: 超卖金叉")
         if level == "NORMAL": level = "C_TIER"
@@ -373,8 +363,6 @@ async def update_stats_data():
             except: pass
     if updates_made: save_settings()
 
-# --- Discord Client (Optimized) ---
-
 class StockBotClient(discord.Client):
     def __init__(self, *, intents: discord.Intents):
         super().__init__(intents=intents)
@@ -431,7 +419,6 @@ class StockBotClient(discord.Client):
             
             if all_alerted: continue
 
-            # Cooldown check
             history = settings.get("signal_history", {})
             in_cooldown = False
             cooldown_days = CONFIG["system"]["cooldown_days"]
@@ -449,7 +436,6 @@ class StockBotClient(discord.Client):
 
             if is_triggered:
                 price = df['close'].iloc[-1]
-                # 使用 ATR 辅助计算动态止损位：收盘价 - 2倍ATR
                 atr_val = df['ATR'].iloc[-1] if 'ATR' in df.columns else (price * 0.05)
                 stop_loss = price - (2 * atr_val)
                 
@@ -459,7 +445,7 @@ class StockBotClient(discord.Client):
                     "priority": CONFIG["priority"].get(level, 0),
                     "price": price,
                     "reason": reason,
-                    "support": stop_loss, # 显示为动态止损位
+                    "support": stop_loss,
                     "df": df,
                     "res_line": res_line,
                     "sup_line": sup_line,
@@ -525,8 +511,6 @@ class StockBotClient(discord.Client):
         
         print(f"[{now_et.strftime('%H:%M')}] Scan finished. Alerts: {len(alerts_buffer)}")
 
-# --- Slash Commands ---
-
 intents = discord.Intents.default()
 client = StockBotClient(intents=intents)
 
@@ -551,7 +535,6 @@ async def watch_remove(interaction: discord.Interaction, codes: str):
     current_list = user_data["stocks"]
     new_list = [s for s in current_list if s not in to_remove]
     user_data["stocks"] = new_list
-    # 清理缓存
     for t in to_remove:
         keys_to_del = [k for k in user_data['daily_status'] if k.startswith(t)]
         for k in keys_to_del: del user_data['daily_status'][k]
@@ -647,7 +630,6 @@ async def test_command(interaction: discord.Interaction, ticker: str):
     df = data_map[ticker]
     trig, reason, level, r_l, s_l = check_signals(df)
     
-    # 模拟止损计算
     price = df['close'].iloc[-1]
     atr_val = df['ATR'].iloc[-1] if 'ATR' in df.columns else (price * 0.05)
     stop_loss = price - (2 * atr_val)
