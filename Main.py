@@ -25,13 +25,17 @@ except (TypeError, ValueError):
 # --- 全局常量 ---
 MARKET_TIMEZONE = pytz.timezone('America/New_York')
 
-# 关键修改：将文件路径指向 Railway 的 Volume 挂载目录
-# 确保在 Railway 的 Volume 设置中 Mount Path 填的是 /app/data
+# 关键修改：指向 Railway Volume 挂载目录
 SETTINGS_FILE = "/app/data/settings.json" 
 
-# 本地测试兼容：如果文件夹不存在（比如在本地跑），就存在当前目录
+# 本地测试兼容：如果文件夹不存在，就存在当前目录
 if not os.path.exists("/app/data"):
-    SETTINGS_FILE = "settings.json"
+    # 尝试创建目录（如果权限允许），否则回退到当前目录
+    try:
+        if not os.path.exists("/app/data"):
+            pass # 本地运行通常没有 /app 权限，保持默认
+    except:
+        SETTINGS_FILE = "settings.json"
 
 # 定义时间点
 TIME_PRE_MARKET_START = time(9, 0)
@@ -41,7 +45,7 @@ TIME_MARKET_CLOSE = time(16, 0)
 # --- 全局变量 ---
 settings = {}
 
-# --- 辅助函数：设置持久化 (文件版) ---
+# --- 辅助函数：设置持久化 ---
 
 def load_settings():
     """从文件加载设置"""
@@ -50,7 +54,10 @@ def load_settings():
         # 确保目录存在
         directory = os.path.dirname(SETTINGS_FILE)
         if directory and not os.path.exists(directory):
-            os.makedirs(directory)
+            try:
+                os.makedirs(directory)
+            except OSError:
+                pass # 本地测试可能无权限，忽略
 
         if os.path.exists(SETTINGS_FILE):
             with open(SETTINGS_FILE, 'r', encoding='utf-8') as f:
@@ -77,7 +84,7 @@ def get_user_data(user_id):
         settings["users"][uid_str] = {"stocks": [], "daily_status": {}}
     return settings["users"][uid_str]
 
-# --- 核心指标计算算法 (保持不变) ---
+# --- 核心指标计算算法 ---
 def calculate_nx_indicators(df):
     df['Nx_Blue_UP'] = df['high'].ewm(span=24, adjust=False).mean()
     df['Nx_Blue_DW'] = df['low'].ewm(span=23, adjust=False).mean()
@@ -150,10 +157,12 @@ def get_stock_data(ticker, days=200):
         print(f"Error fetching {ticker}: {e}")
         return None
 
-# --- Bot Logic ---
+# --- Discord Client (后台任务) ---
+
 class StockBotClient(discord.Client):
     def __init__(self, *, intents: discord.Intents):
         super().__init__(intents=intents)
+        # 将 CommandTree 绑定到实例
         self.tree = app_commands.CommandTree(self)
         self.alert_channel = None
 
@@ -162,7 +171,9 @@ class StockBotClient(discord.Client):
         print(f'Logged in as {self.user}')
         self.alert_channel = self.get_channel(ALERT_CHANNEL_ID)
         self.monitor_stocks.start()
+        # 关键：同步斜杠命令到 Discord
         await self.tree.sync()
+        print("Slash commands synced!")
 
     @tasks.loop(minutes=5)
     async def monitor_stocks(self):
@@ -171,6 +182,8 @@ class StockBotClient(discord.Client):
         curr_time, today_str = now_et.time(), now_et.strftime('%Y-%m-%d')
         is_pre = TIME_PRE_MARKET_START <= curr_time < TIME_MARKET_OPEN
         is_open = TIME_MARKET_OPEN <= curr_time <= TIME_MARKET_CLOSE
+        
+        # 只在盘前或盘中运行
         if not (is_pre or is_open): return
         
         print(f"[{now_et.strftime('%H:%M')}] Scanning markets...")
@@ -230,46 +243,54 @@ class StockBotClient(discord.Client):
                         if os.path.exists(chart_file): os.remove(chart_file)
             time_module.sleep(1.5)
 
-    @self.tree.command(name="addstocks", description="[个人] 添加关注股票")
-    async def add_stocks(self, interaction: discord.Interaction, tickers: str):
-        await interaction.response.defer()
-        user_data = get_user_data(interaction.user.id)
-        new_list = list(set([t.strip().upper() for t in tickers.replace(',', ' ').split() if t.strip()]))
-        current_set = set(user_data["stocks"])
-        current_set.update(new_list)
-        user_data["stocks"] = list(current_set)
-        save_settings()
-        await interaction.followup.send(f"✅ 已添加！新增: `{', '.join(new_list)}`")
+# --- 实例化 Client ---
 
-    @self.tree.command(name="liststocks", description="[个人] 查看我的股票")
-    async def list_stocks(self, interaction: discord.Interaction):
-        stocks = get_user_data(interaction.user.id)["stocks"]
-        await interaction.response.send_message(f"📋 **关注列表**:\n`{', '.join(stocks) if stocks else '空'}`", ephemeral=True)
+intents = discord.Intents.default()
+client = StockBotClient(intents=intents)
 
-    @self.tree.command(name="clearstocks", description="[个人] 清空我的股票")
-    async def clear_stocks(self, interaction: discord.Interaction):
-        user_data = get_user_data(interaction.user.id)
-        user_data["stocks"] = []
-        user_data["daily_status"] = {}
-        save_settings()
-        await interaction.response.send_message("🗑️ 已清空。", ephemeral=True)
+# --- 注册命令 (在 Class 之外注册) ---
 
-    @self.tree.command(name="test", description="[测试] 立即测试股票")
-    async def test_command(self, interaction: discord.Interaction, ticker: str):
-        await interaction.response.defer()
-        df = get_stock_data(ticker.upper().strip())
-        if df is None:
-            await interaction.followup.send("❌ 获取失败")
-            return
-        chart_file = generate_chart(df, ticker.upper().strip())
-        last_row = df.iloc[-1]
-        msg = f"✅ 测试正常 | `{ticker}`\nClose: `{last_row['close']}`\nRSI: `{last_row['RSI']:.2f}`"
-        try:
-            with discord.File(chart_file) as file:
-                await interaction.followup.send(content=msg, file=file)
-        finally:
-            if os.path.exists(chart_file): os.remove(chart_file)
+@client.tree.command(name="addstocks", description="[个人] 添加关注股票")
+async def add_stocks(interaction: discord.Interaction, tickers: str):
+    await interaction.response.defer()
+    user_data = get_user_data(interaction.user.id)
+    new_list = list(set([t.strip().upper() for t in tickers.replace(',', ' ').split() if t.strip()]))
+    current_set = set(user_data["stocks"])
+    current_set.update(new_list)
+    user_data["stocks"] = list(current_set)
+    save_settings()
+    await interaction.followup.send(f"✅ 已添加！新增: `{', '.join(new_list)}`")
 
+@client.tree.command(name="liststocks", description="[个人] 查看我的股票")
+async def list_stocks(interaction: discord.Interaction):
+    stocks = get_user_data(interaction.user.id)["stocks"]
+    await interaction.response.send_message(f"📋 **关注列表**:\n`{', '.join(stocks) if stocks else '空'}`", ephemeral=True)
+
+@client.tree.command(name="clearstocks", description="[个人] 清空我的股票")
+async def clear_stocks(interaction: discord.Interaction):
+    user_data = get_user_data(interaction.user.id)
+    user_data["stocks"] = []
+    user_data["daily_status"] = {}
+    save_settings()
+    await interaction.response.send_message("🗑️ 已清空。", ephemeral=True)
+
+@client.tree.command(name="test", description="[测试] 立即测试股票")
+async def test_command(interaction: discord.Interaction, ticker: str):
+    await interaction.response.defer()
+    df = get_stock_data(ticker.upper().strip())
+    if df is None:
+        await interaction.followup.send("❌ 获取失败")
+        return
+    chart_file = generate_chart(df, ticker.upper().strip())
+    last_row = df.iloc[-1]
+    msg = f"✅ 测试正常 | `{ticker}`\nClose: `{last_row['close']}`\nRSI: `{last_row['RSI']:.2f}`"
+    try:
+        with discord.File(chart_file) as file:
+            await interaction.followup.send(content=msg, file=file)
+    finally:
+        if os.path.exists(chart_file): os.remove(chart_file)
+
+# --- 启动程序 ---
 if __name__ == "__main__":
     if DISCORD_TOKEN:
-        StockBotClient(intents=discord.Intents.default()).run(DISCORD_TOKEN)
+        client.run(DISCORD_TOKEN)
