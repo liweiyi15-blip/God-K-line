@@ -13,6 +13,7 @@ from dotenv import load_dotenv
 from collections import defaultdict
 from scipy.stats import linregress
 import aiohttp
+import io
 
 # --- 加载环境变量 ---
 load_dotenv()
@@ -27,7 +28,6 @@ except (TypeError, ValueError):
 # --- 全局配置 ---
 MARKET_TIMEZONE = pytz.timezone('America/New_York')
 
-# [修改] 优化路径检测逻辑，适配 Railway 和本地环境
 SETTINGS_FILE = "/app/data/settings.json"
 if not os.path.exists("/app/data"):
     SETTINGS_FILE = "settings.json"
@@ -39,11 +39,11 @@ TIME_MARKET_CLOSE = time(16, 0)
 # --- 核心策略配置 ---
 CONFIG = {
     "filter": {
-        "max_60d_gain": 3.0,     # 放宽：允许60天涨幅达到200%（捕捉妖股）
-        "max_rsi": 85,           # 新增：RSI超过85视为极度超买，暂停推荐
-        "max_day_change": 0.15,  # 允许单日波动稍微大一点
-        "min_vol_ratio": 1.3,    # 收盘量比阈值
-        "intraday_vol_ratio": 1.8, # 新增：盘中推算量比阈值（要求更严）
+        "max_60d_gain": 3.0,     
+        "max_rsi": 85,           
+        "max_day_change": 0.15,  
+        "min_vol_ratio": 1.3,    
+        "intraday_vol_ratio": 1.8, 
         "min_converge_angle": 0.05
     },
     "pattern": {
@@ -51,8 +51,9 @@ CONFIG = {
         "window": 60
     },
     "system": {
-        "cooldown_days": 5,      
-        "max_charts_per_scan": 5 
+        "cooldown_days": 5,
+        "max_charts_per_scan": 5,
+        "history_days": 400      # 保持400天以确保EMA90准确
     },
     "emoji": {
         "GOD_TIER": "👑", "S_TIER": "🔥", "A_TIER": "📈", 
@@ -87,9 +88,13 @@ def load_settings():
 
 def save_settings():
     try:
+        dir_name = os.path.dirname(SETTINGS_FILE)
+        if dir_name and not os.path.exists(dir_name):
+            os.makedirs(dir_name, exist_ok=True)
         with open(SETTINGS_FILE, 'w', encoding='utf-8') as f:
             json.dump(settings, f, indent=4)
-    except: pass
+    except Exception as e:
+        print(f"Error saving settings: {e}")
 
 def get_user_data(user_id):
     uid_str = str(user_id)
@@ -98,58 +103,14 @@ def get_user_data(user_id):
         settings["users"][uid_str] = {"stocks": [], "daily_status": {}}
     return settings["users"][uid_str]
 
-# --- 核心逻辑 ---
-async def fetch_historical_batch(symbols: list, days=400):
-    if not symbols: return {}
-    chunk_size = 50 
-    results = {}
-    now = datetime.now()
-    from_date = (now - timedelta(days=days)).strftime("%Y-%m-%d")
-    to_date = now.strftime("%Y-%m-%d")
-    
-    if not FMP_API_KEY:
-        print("⚠️ [SYSTEM ERROR] FMP_API_KEY environment variable is missing!")
-        return {}
-
-    async with aiohttp.ClientSession() as session:
-        for i in range(0, len(symbols), chunk_size):
-            chunk = symbols[i:i + chunk_size]
-            symbols_str = ",".join(chunk)
-            # [修改] 使用 stable 接口，并调整 URL 格式
-            url = f"https://financialmodelingprep.com/stable/historical-price-eod/full?symbol={symbols_str}&from={from_date}&to={to_date}&apikey={FMP_API_KEY}"
-            try:
-                async with session.get(url) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        if isinstance(data, dict):
-                            if "Error Message" in data:
-                                print(f"⚠️ [API ERROR] API returned error: {data['Error Message']}")
-                                continue
-                            if "historicalStockList" in data: items = data["historicalStockList"]
-                            elif "symbol" in data and "historical" in data: items = [data]
-                            else: items = []
-                        elif isinstance(data, list): items = data
-                        else: items = []
-                        
-                        for item in items:
-                            sym = item.get('symbol')
-                            hist = item.get('historical', [])
-                            if not hist or not sym: continue
-                            df = pd.DataFrame(hist)
-                            if 'date' not in df.columns: continue
-                            df['date'] = pd.to_datetime(df['date'])
-                            df = df.set_index('date').sort_index(ascending=True)
-                            df = calculate_nx_indicators(df)
-                            results[sym] = df
-                    else:
-                        err_text = await response.text()
-                        masked_url = url.replace(FMP_API_KEY, "***")
-                        print(f"⚠️ [API ERROR] Status: {response.status} | URL: {masked_url} | Response: {err_text}")
-            except Exception as e: 
-                print(f"⚠️ [EXCEPTION] Fetch Error: {e}")
-    return results
-
+# --- 核心逻辑 (计算部分) ---
 def calculate_nx_indicators(df):
+    """计算核心指标，必须在每次更新数据后调用"""
+    # 确保数值类型正确
+    cols = ['open', 'high', 'low', 'close', 'volume']
+    for c in cols:
+        df[c] = pd.to_numeric(df[c], errors='coerce')
+        
     df['Nx_Blue_UP'] = df['high'].ewm(span=24, adjust=False).mean()
     df['Nx_Blue_DW'] = df['low'].ewm(span=23, adjust=False).mean()
     df['Nx_Yellow_UP'] = df['high'].ewm(span=89, adjust=False).mean()
@@ -177,6 +138,121 @@ def calculate_nx_indicators(df):
     df['ATR'] = df['TR'].rolling(window=14).mean()
     
     return df
+
+def process_dataframe_sync(hist_data):
+    """处理历史数据初始加载"""
+    if not hist_data: return None
+    df = pd.DataFrame(hist_data)
+    if 'date' not in df.columns: return None
+    df['date'] = pd.to_datetime(df['date'])
+    df = df.set_index('date').sort_index(ascending=True)
+    return calculate_nx_indicators(df)
+
+def merge_and_recalc_sync(df, quote):
+    """
+    [新增] 将实时Quote缝合到历史DataFrame中，并重新计算指标
+    这是日内交易的核心：历史趋势 + 实时价格
+    """
+    if df is None or quote is None: return df
+    
+    # 解析 Quote 数据
+    try:
+        # FMP timestamp 是 Unix timestamp (秒)
+        quote_time = pd.to_datetime(quote['timestamp'], unit='s').tz_localize('UTC').tz_convert(MARKET_TIMEZONE)
+        # 移除时间部分，只保留日期，用于判断是"更新今日"还是"新增今日"
+        quote_date = quote_time.normalize()
+        
+        last_idx = df.index[-1]
+        last_date = last_idx.normalize() if hasattr(last_idx, 'normalize') else pd.to_datetime(last_idx).normalize()
+
+        new_row = {
+            'open': quote['open'],
+            'high': max(quote['dayHigh'], quote['price']), # 保护：有时候价格比dayHigh还高
+            'low': min(quote['dayLow'], quote['price']),
+            'close': quote['price'],
+            'volume': quote['volume'],
+            'date': quote_date # 索引使用日期
+        }
+
+        # 逻辑：如果历史数据的最后一天 == Quote的日期，说明历史数据已经包含了今天（部分），需要覆盖更新
+        # 如果历史数据最后一天 < Quote的日期，说明是新的一天，追加
+        
+        df_mod = df.copy()
+        
+        if last_date == quote_date:
+            # 更新最后一行
+            for col in ['open', 'high', 'low', 'close', 'volume']:
+                df_mod.at[last_idx, col] = new_row[col]
+        elif last_date < quote_date:
+            # 追加新的一行
+            new_df = pd.DataFrame([new_row])
+            new_df = new_df.set_index('date')
+            df_mod = pd.concat([df_mod, new_df])
+        
+        # 必须重新计算指标，因为Close变了，EMA/RSI/MACD都会变
+        return calculate_nx_indicators(df_mod)
+        
+    except Exception as e:
+        print(f"Merge Error: {e}")
+        return df
+
+async def fetch_historical_batch(symbols: list, days=None):
+    if not symbols: return {}
+    if days is None: days = CONFIG["system"]["history_days"]
+    
+    chunk_size = 50 
+    results = {}
+    now = datetime.now()
+    from_date = (now - timedelta(days=days)).strftime("%Y-%m-%d")
+    to_date = now.strftime("%Y-%m-%d")
+    
+    async with aiohttp.ClientSession() as session:
+        for i in range(0, len(symbols), chunk_size):
+            chunk = symbols[i:i + chunk_size]
+            symbols_str = ",".join(chunk)
+            url = f"https://financialmodelingprep.com/stable/historical-price-eod/full?symbol={symbols_str}&from={from_date}&to={to_date}&apikey={FMP_API_KEY}"
+            try:
+                async with session.get(url) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        items = []
+                        if isinstance(data, dict):
+                            if "historicalStockList" in data: items = data["historicalStockList"]
+                            elif "symbol" in data and "historical" in data: items = [data]
+                        elif isinstance(data, list): items = data
+                        
+                        for item in items:
+                            sym = item.get('symbol')
+                            hist = item.get('historical', [])
+                            if not hist or not sym: continue
+                            df = await asyncio.to_thread(process_dataframe_sync, hist)
+                            if df is not None: results[sym] = df
+            except Exception: pass
+    return results
+
+async def fetch_realtime_quotes(symbols: list):
+    """[新增] 批量获取实时报价"""
+    if not symbols: return {}
+    chunk_size = 100 # Quote 接口通常支持更多
+    quotes_map = {}
+    
+    async with aiohttp.ClientSession() as session:
+        for i in range(0, len(symbols), chunk_size):
+            chunk = symbols[i:i + chunk_size]
+            symbols_str = ",".join(chunk)
+            # 使用 quote 接口
+            url = f"https://financialmodelingprep.com/stable/quote?symbol={symbols_str}&apikey={FMP_API_KEY}"
+            try:
+                async with session.get(url) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        if isinstance(data, list):
+                            for item in data:
+                                sym = item.get('symbol')
+                                if sym: quotes_map[sym] = item
+            except Exception as e:
+                print(f"Quote Fetch Error: {e}")
+    return quotes_map
 
 def linreg_trend(points, min_r2):
     if len(points) < 4: return None
@@ -226,7 +302,7 @@ def identify_patterns(df):
                         return "🚩 **放量旗形突破(机构算法)**", [[(t1,p1), (t2,p2)]], [[(t3,p3), (t4,p4)]]
     return None, [], []
 
-def check_signals(df):
+def check_signals_sync(df):
     if len(df) < 60: return False, "", "NONE", [], []
     curr = df.iloc[-1]
     prev = df.iloc[-2]
@@ -245,7 +321,8 @@ def check_signals(df):
     is_open_market = 0 < minutes_elapsed < 390
     
     if is_open_market:
-        projection_factor = 390 / max(minutes_elapsed, 20) 
+        safe_minutes = max(minutes_elapsed, 20) 
+        projection_factor = 390 / safe_minutes
         proj_vol = curr['volume'] * projection_factor
         vol_threshold = CONFIG["filter"]["intraday_vol_ratio"]
     else:
@@ -293,6 +370,9 @@ def check_signals(df):
         return True, "\n".join(triggers), level, res_line, sup_line
     return False, "", "NONE", [], []
 
+async def check_signals(df):
+    return await asyncio.to_thread(check_signals_sync, df)
+
 def _generate_chart_sync(df, ticker, res_line=[], sup_line=[]):
     filename = f"{ticker}_alert.png"
     s = mpf.make_marketcolors(up='r', down='g', inherit=True)
@@ -325,7 +405,9 @@ async def update_stats_data():
     symbols_to_check = set()
     history = settings["signal_history"]
     for date_str, tickers_data in history.items():
-        signal_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+        try:
+            signal_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+        except ValueError: continue
         today = datetime.now().date()
         if signal_date >= today: continue 
         for ticker, data in tickers_data.items():
@@ -334,7 +416,7 @@ async def update_stats_data():
             need_20d = data.get("ret_20d") is None and (today - signal_date).days > 20
             if need_1d or need_5d or need_20d: symbols_to_check.add(ticker)
     if not symbols_to_check: return
-    data_map = await fetch_historical_batch(list(symbols_to_check), days=50)
+    data_map = await fetch_historical_batch(list(symbols_to_check), days=60)
     for date_str, tickers_data in history.items():
         signal_date = datetime.strptime(date_str, "%Y-%m-%d").date()
         for ticker, data in tickers_data.items():
@@ -397,10 +479,23 @@ class StockBotClient(discord.Client):
 
         if not all_tickers: return
 
-        data_map = await fetch_historical_batch(list(all_tickers))
+        # 1. 获取历史数据 (Base)
+        hist_map = await fetch_historical_batch(list(all_tickers))
+        
+        # 2. 获取实时报价 (Intraday Update)
+        quotes_map = {}
+        if is_open:
+            quotes_map = await fetch_realtime_quotes(list(all_tickers))
+
         alerts_buffer = []
 
-        for ticker, df in data_map.items():
+        for ticker, df_hist in hist_map.items():
+            # 缝合逻辑：将实时报价缝合到历史数据中
+            df = df_hist
+            if ticker in quotes_map:
+                # 在线程池中执行缝合+重算，防止阻塞
+                df = await asyncio.to_thread(merge_and_recalc_sync, df_hist, quotes_map[ticker])
+
             user_ids = ticker_user_map[ticker]
             all_alerted = True
             users_to_ping = []
@@ -427,7 +522,7 @@ class StockBotClient(discord.Client):
                         in_cooldown = True
                         break 
                     
-            is_triggered, reason, level, res_line, sup_line = check_signals(df)
+            is_triggered, reason, level, res_line, sup_line = await check_signals(df)
             
             if in_cooldown and level != "GOD_TIER": continue 
 
@@ -620,12 +715,21 @@ async def stats_command(interaction: discord.Interaction):
 async def test_command(interaction: discord.Interaction, ticker: str):
     await interaction.response.defer()
     ticker = ticker.upper().strip()
+    
+    # 获取历史 + 实时
     data_map = await fetch_historical_batch([ticker])
+    quotes_map = await fetch_realtime_quotes([ticker])
+    
     if not data_map or ticker not in data_map:
         await interaction.followup.send(f"❌ 失败 `{ticker}`")
         return
+        
     df = data_map[ticker]
-    trig, reason, level, r_l, s_l = check_signals(df)
+    # 如果有实时数据，进行缝合
+    if ticker in quotes_map:
+        df = await asyncio.to_thread(merge_and_recalc_sync, df, quotes_map[ticker])
+
+    is_triggered, reason, level, r_l, s_l = await check_signals(df)
     
     price = df['close'].iloc[-1]
     atr_val = df['ATR'].iloc[-1] if 'ATR' in df.columns else (price * 0.05)
