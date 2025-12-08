@@ -4,7 +4,7 @@ from discord.ext import tasks
 import requests
 import json
 import os
-from datetime import datetime, time, timedelta  # 引入 timedelta
+from datetime import datetime, time, timedelta
 import time as time_module
 import pandas as pd
 import mplfinance as mpf
@@ -123,7 +123,11 @@ def check_signals(df):
 def generate_chart(df, ticker):
     filename = f"{ticker}_alert.png"
     s = mpf.make_marketcolors(up='r', down='g', inherit=True)
-    my_style = mpf.make_mpf_style(base_mpl_style="seaborn", marketcolors=s, gridstyle=":")
+    
+    # 🔴 关键修复：将 "seaborn" 改为 "ggplot" (或者 "seaborn-v0_8")
+    # "ggplot" 是一个稳定且兼容性极好的样式，避免了新版 Matplotlib 找不到 seaborn 样式的问题
+    my_style = mpf.make_mpf_style(base_mpl_style="ggplot", marketcolors=s, gridstyle=":")
+    
     plot_df = df.tail(60)
     add_plots = [
         mpf.make_addplot(plot_df['Nx_Blue_UP'], color='dodgerblue', width=1.0),
@@ -138,18 +142,13 @@ def generate_chart(df, ticker):
     mpf.plot(plot_df, type='candle', style=my_style, title=title, ylabel='Price ($)', addplot=add_plots, volume=True, panel_ratios=(6, 2, 2), savefig=filename)
     return filename
 
-# --- 数据获取 (优化版：只获取最近 400 天) ---
+# --- 数据获取 ---
 
 def get_stock_data(ticker, days=200):
-    # 1. 动态计算日期范围
-    # 我们只需要最近 1 年左右的数据来确保 EMA90 计算准确
-    # 这样可以大幅减少数据传输量，提高速度，降低内存占用
     now = datetime.now()
     end_date_str = now.strftime("%Y-%m-%d")
-    # 往前推 400 天 (包含周末和假期，确保足够的交易日数据)
     start_date_str = (now - timedelta(days=400)).strftime("%Y-%m-%d")
     
-    # 2. 构造带日期范围的 URL
     url = (
         f"https://financialmodelingprep.com/stable/historical-price-eod/full"
         f"?symbol={ticker}&from={start_date_str}&to={end_date_str}&apikey={FMP_API_KEY}"
@@ -181,14 +180,12 @@ def get_stock_data(ticker, days=200):
         df = df.set_index('date').sort_index(ascending=True)
         df.index = pd.to_datetime(df.index)
         
-        # 3. 再次确认数据量
         print(f"✅ [Success] Loaded {len(df)} rows for {ticker}")
         
-        # 至少需要 90 天数据才能算出 EMA90
         if len(df) < 90:
             print(f"⚠️ [Warning] Not enough data for {ticker} (only {len(df)} rows). Indicators may be inaccurate.")
             
-        return calculate_nx_indicators(df) # 计算全部获取的数据，绘图时再切片
+        return calculate_nx_indicators(df)
         
     except Exception as e:
         print(f"❌ [Exception] Error fetching {ticker}: {e}")
