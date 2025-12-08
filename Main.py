@@ -74,9 +74,9 @@ CONFIG = {
     }
 }
 
-# --- 静态股票池 ---
+# --- 静态股票池 (已清理退市股票) ---
 STOCK_POOLS = {
-    "NASDAQ_100": ["AAPL", "MSFT", "AMZN", "NVDA", "META", "GOOGL", "GOOG", "TSLA", "AVGO", "ADBE", "COST", "PEP", "CSCO", "NFLX", "AMD", "TMUS", "INTC", "CMCSA", "AZN", "QCOM", "TXN", "AMGN", "HON", "INTU", "SBUX", "GILD", "BKNG", "DIOD", "MDLZ", "ISRG", "REGN", "LRCX", "VRTX", "ADP", "ADI", "MELI", "KLAC", "PANW", "SNPS", "CDNS", "CHTR", "MAR", "CSX", "ORLY", "MNST", "NXPI", "CTAS", "FTNT", "WDAY", "DXCM", "PCAR", "KDP", "PAYX", "IDXX", "AEP", "LULU", "EXC", "BIIB", "ADSK", "XEL", "ROST", "MCHP", "CPRT", "SGEN", "DLTR", "EA", "FAST", "CTSH", "WBA", "VRSK", "CSGP", "ODFL", "ANSS", "EBAY", "ILMN", "GFS", "ALGN", "TEAM", "CDW", "WBD", "SIRI", "ZM", "ENPH", "JD", "PDD", "LCID", "RIVN", "ZS", "DDOG", "CRWD", "TTD", "BKR", "CEG", "GEHC", "ON", "FANG"],
+    "NASDAQ_100": ["AAPL", "MSFT", "AMZN", "NVDA", "META", "GOOGL", "GOOG", "TSLA", "AVGO", "ADBE", "COST", "PEP", "CSCO", "NFLX", "AMD", "TMUS", "INTC", "CMCSA", "AZN", "QCOM", "TXN", "AMGN", "HON", "INTU", "SBUX", "GILD", "BKNG", "DIOD", "MDLZ", "ISRG", "REGN", "LRCX", "VRTX", "ADP", "ADI", "MELI", "KLAC", "PANW", "SNPS", "CDNS", "CHTR", "MAR", "CSX", "ORLY", "MNST", "NXPI", "CTAS", "FTNT", "WDAY", "DXCM", "PCAR", "KDP", "PAYX", "IDXX", "AEP", "LULU", "EXC", "BIIB", "ADSK", "XEL", "ROST", "MCHP", "CPRT", "DLTR", "EA", "FAST", "CTSH", "WBA", "VRSK", "CSGP", "ODFL", "ANSS", "EBAY", "ILMN", "GFS", "ALGN", "TEAM", "CDW", "WBD", "SIRI", "ZM", "ENPH", "JD", "PDD", "LCID", "RIVN", "ZS", "DDOG", "CRWD", "TTD", "BKR", "CEG", "GEHC", "ON", "FANG"],
     "GOD_TIER": ["NVDA", "AMD", "TSM", "SMCI", "AVGO", "ARM", "PLTR", "AI", "PATH", "BABA", "PDD", "BIDU", "NIO", "LI", "XPEV", "COIN", "MARA", "MSTR"]
 }
 
@@ -115,20 +115,17 @@ def get_user_data(user_id):
 
 # --- 核心逻辑 (指标计算) ---
 def calculate_nx_indicators(df):
-    """计算核心指标，必须在每次更新数据后调用"""
     cols = ['open', 'high', 'low', 'close', 'volume']
     for c in cols:
         df[c] = pd.to_numeric(df[c], errors='coerce')
     
-    df = df[df['close'] > 0] # 剔除坏数据
+    df = df[df['close'] > 0]
     
-    # 1. 基础 Nx 均线
     df['Nx_Blue_UP'] = df['high'].ewm(span=24, adjust=False).mean()
     df['Nx_Blue_DW'] = df['low'].ewm(span=23, adjust=False).mean()
     df['Nx_Yellow_UP'] = df['high'].ewm(span=89, adjust=False).mean()
     df['Nx_Yellow_DW'] = df['low'].ewm(span=90, adjust=False).mean()
     
-    # 2. MACD
     price_col = 'close'
     exp12 = df[price_col].ewm(span=12, adjust=False).mean()
     exp26 = df[price_col].ewm(span=26, adjust=False).mean()
@@ -136,31 +133,26 @@ def calculate_nx_indicators(df):
     df['DEA'] = df['DIF'].ewm(span=9, adjust=False).mean()
     df['MACD'] = (df['DIF'] - df['DEA']) * 2
     
-    # 3. RSI
     delta = df[price_col].diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
     rs = gain / loss
     df['RSI'] = 100 - (100 / (1 + rs))
     
-    # 4. Volume MA
     df['Vol_MA20'] = df['volume'].rolling(window=20).mean()
     
-    # 5. ATR (用于动态止损)
     df['tr1'] = df['high'] - df['low']
     df['tr2'] = abs(df['high'] - df['close'].shift(1))
     df['tr3'] = abs(df['low'] - df['close'].shift(1))
     df['TR'] = df[['tr1', 'tr2', 'tr3']].max(axis=1)
     df['ATR'] = df['TR'].rolling(window=14).mean()
 
-    # 6. 布林带 (Bollinger Bands)
     df['BB_Mid'] = df['close'].rolling(20).mean()
     df['BB_Std'] = df['close'].rolling(20).std()
     df['BB_Up'] = df['BB_Mid'] + 2 * df['BB_Std']
     df['BB_Low'] = df['BB_Mid'] - 2 * df['BB_Std']
     df['BB_Width'] = (df['BB_Up'] - df['BB_Low']) / df['BB_Mid']
 
-    # 7. KDJ (9,3,3)
     low_min = df['low'].rolling(9).min()
     high_max = df['high'].rolling(9).max()
     df['RSV'] = (df['close'] - low_min) / (high_max - low_min) * 100
@@ -171,7 +163,6 @@ def calculate_nx_indicators(df):
     return df
 
 def process_dataframe_sync(hist_data):
-    """处理历史数据初始加载"""
     if not hist_data: return None
     df = pd.DataFrame(hist_data)
     if 'date' not in df.columns: return None
@@ -224,7 +215,7 @@ def merge_and_recalc_sync(df, quote):
 
 async def fetch_historical_batch(symbols: list, days=None):
     """
-    [Debugging Version] 增加详细日志，保留用户原 URL
+    [ULTRA DEBUG] 打印详细 URL 和返回内容
     """
     if not symbols: return {}
     if days is None: days = CONFIG["system"]["history_days"]
@@ -236,7 +227,6 @@ async def fetch_historical_batch(symbols: list, days=None):
     
     semaphore = asyncio.Semaphore(10)
     
-    # 极强伪装：完全模拟 Chrome 浏览器
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Accept": "application/json, text/plain, */*",
@@ -247,12 +237,14 @@ async def fetch_historical_batch(symbols: list, days=None):
     }
 
     async def fetch_single(session, sym):
-        # 策略A: 用户指定的 Query 参数格式 (historical-price-eod)
+        # 策略A URL
         url_a = f"https://financialmodelingprep.com/stable/historical-price-eod/full?symbol={sym}&from={from_date}&to={to_date}&apikey={FMP_API_KEY}"
         
         async with semaphore:
             success = False
-            # 尝试 URL A
+            # 打印请求
+            # print(f"🔍 [发起请求 A] {url_a}") # 如果不想刷屏太快，注释掉这行，或者只在出错时看
+            
             try:
                 async with session.get(url_a, ssl=False) as response:
                     if response.status == 200:
@@ -271,19 +263,24 @@ async def fetch_historical_batch(symbols: list, days=None):
                                     df = await asyncio.to_thread(process_dataframe_sync, hist)
                                     if df is not None: results[sym] = df
                         else:
-                             # 调试日志：空数据
-                             print(f"⚠️ [DEBUG] {sym} 状态200但数据为空. API返回: {str(data)[:200]}")
+                             # 状态 200 但数据为空
+                             print(f"⚠️ [数据为空 A] {sym} | URL: {url_a}")
+                             print(f"📄 [返回内容 A] {str(data)[:300]}") # 打印前300字符
                     else:
-                        # 调试日志：非200状态码
+                        # 状态不是 200
                         error_text = await response.text()
-                        print(f"❌ [DEBUG HTTP ERROR] {sym} (Strategy A) Status: {response.status} | Content: {error_text[:200]}")
+                        print(f"❌ [HTTP 错误 A] {sym} | Status: {response.status} | URL: {url_a}")
+                        print(f"📄 [返回内容 A] {error_text[:300]}")
 
             except Exception as e:
-                print(f"❌ [Strategy A Exception] {sym}: {e}")
+                print(f"❌ [异常 A] {sym}: {e}")
 
-            # 策略B (Failover): Path 参数格式 (historical-price-eod)
+            # 策略B URL
             if not success:
                 url_b = f"https://financialmodelingprep.com/stable/historical-price-eod/full/{sym}?from={from_date}&to={to_date}&apikey={FMP_API_KEY}"
+                
+                # print(f"🔍 [发起请求 B] {url_b}") # Debug
+
                 try:
                     async with session.get(url_b, ssl=False) as response_b:
                         if response_b.status == 200:
@@ -300,14 +297,15 @@ async def fetch_historical_batch(symbols: list, days=None):
                                         df = await asyncio.to_thread(process_dataframe_sync, hist)
                                         if df is not None: results[sym] = df
                             else:
-                                print(f"🔥 [FATAL] {sym} 两种格式均无数据.")
+                                print(f"⚠️ [数据为空 B] {sym} | URL: {url_b}")
+                                print(f"📄 [返回内容 B] {str(data_b)[:300]}")
                         else:
-                            # 调试日志：非200状态码
                             error_text = await response_b.text()
-                            print(f"❌ [DEBUG HTTP ERROR] {sym} (Strategy B) Status: {response_b.status} | Content: {error_text[:200]}")
+                            print(f"❌ [HTTP 错误 B] {sym} | Status: {response_b.status} | URL: {url_b}")
+                            print(f"📄 [返回内容 B] {error_text[:300]}")
 
                 except Exception as e:
-                      print(f"❌ [Strategy B Exception] {sym}: {e}")
+                      print(f"❌ [异常 B] {sym}: {e}")
 
     async with aiohttp.ClientSession(headers=headers) as session:
         tasks_list = [fetch_single(session, sym) for sym in symbols]
@@ -317,7 +315,7 @@ async def fetch_historical_batch(symbols: list, days=None):
 
 async def fetch_realtime_quotes(symbols: list):
     """
-    [Debugging Version] 增加详细日志
+    [ULTRA DEBUG] 打印详细 URL 和返回内容
     """
     if not symbols: return {}
     
@@ -331,6 +329,8 @@ async def fetch_realtime_quotes(symbols: list):
     
     async def fetch_single_quote(session, sym):
         url = f"https://financialmodelingprep.com/stable/quote?symbol={sym}&apikey={FMP_API_KEY}"
+        # print(f"🔍 [发起请求 Quote] {url}") # Debug
+        
         async with semaphore:
             try:
                 async with session.get(url, ssl=False) as response:
@@ -343,11 +343,15 @@ async def fetch_realtime_quotes(symbols: list):
                         elif isinstance(data, dict):
                              s = data.get('symbol')
                              if s: quotes_map[s] = data
+                        else:
+                             print(f"⚠️ [数据异常 Quote] {sym} | URL: {url}")
+                             print(f"📄 [返回内容 Quote] {str(data)[:300]}")
                     else:
                         error_text = await response.text()
-                        print(f"❌ [DEBUG QUOTE ERROR] {sym} Status: {response.status} | Content: {error_text[:200]}")
+                        print(f"❌ [HTTP 错误 Quote] {sym} | Status: {response.status} | URL: {url}")
+                        print(f"📄 [返回内容 Quote] {error_text[:300]}")
             except Exception as e:
-                print(f"❌ [EXCEPTION] Quote {sym}: {e}")
+                print(f"❌ [异常 Quote] {sym}: {e}")
 
     async with aiohttp.ClientSession(headers=headers) as session:
         tasks_list = [fetch_single_quote(session, sym) for sym in symbols]
