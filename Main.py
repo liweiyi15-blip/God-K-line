@@ -1,11 +1,10 @@
 import discord
 from discord import app_commands
 from discord.ext import tasks
-import requests
 import json
 import os
 from datetime import datetime, time, timedelta
-import asyncio 
+import asyncio
 import pandas as pd
 import numpy as np
 import mplfinance as mpf
@@ -13,7 +12,7 @@ import pytz
 from dotenv import load_dotenv
 from collections import defaultdict
 from scipy.stats import linregress
-import aiohttp # [新增] 用于异步请求 FMP 价格
+import aiohttp
 
 # --- 加载环境变量 ---
 load_dotenv()
@@ -23,11 +22,11 @@ FMP_API_KEY = os.getenv("FMP_API_KEY")
 try:
     ALERT_CHANNEL_ID = int(os.getenv("ALERT_CHANNEL_ID"))
 except (TypeError, ValueError):
-    ALERT_CHANNEL_ID = 0 
+    ALERT_CHANNEL_ID = 0
 
-# --- 全局常量 ---
+# --- 全局配置与常量 (对应图片建议：配置抽离) ---
 MARKET_TIMEZONE = pytz.timezone('America/New_York')
-SETTINGS_FILE = "/app/data/settings.json" 
+SETTINGS_FILE = "/app/data/settings.json"
 
 # 本地测试兼容
 if not os.path.exists("/app/data"):
@@ -39,6 +38,29 @@ if not os.path.exists("/app/data"):
 TIME_PRE_MARKET_START = time(9, 0)
 TIME_MARKET_OPEN = time(9, 30)
 TIME_MARKET_CLOSE = time(16, 0)
+
+# --- 核心策略配置 (在此处统一调参) ---
+CONFIG = {
+    "filter": {
+        "max_60d_gain": 1.4,       # [风控] 60天涨幅超过40%过滤
+        "max_3d_gain": 0.35,       # [风控] 3天涨幅超过35%过滤 (防止追高)
+        "max_day_change": 0.12,    # [风控] 单日涨跌幅超过12%过滤 (防天地板情绪过热)
+        "min_vol_ratio": 1.3,      # 放量倍数
+        "min_converge_angle": 0.05 # 旗形收敛角度差
+    },
+    "pattern": {
+        "min_r2": 0.70,            # [质量] 线性回归拟合度阈值 (0.7才算有效趋势)
+        "window": 60               # 扫描窗口
+    },
+    "emoji": {
+        "GOD_TIER": "👑", 
+        "S_TIER": "🔥", 
+        "A_TIER": "📈", 
+        "B_TIER": "💎", 
+        "C_TIER": "🚀",
+        "RISK": "🛡️"
+    }
+}
 
 # --- 静态股票池 ---
 NASDAQ_100_LIST = [
@@ -55,10 +77,10 @@ NASDAQ_100_LIST = [
 ]
 
 GOD_TIER_LIST = [
-    "NVDA", "AMD", "TSM", "SMCI", "AVGO", "ARM", 
-    "PLTR", "AI", "PATH", 
-    "BABA", "PDD", "BIDU", "NIO", "LI", "XPEV", 
-    "COIN", "MARA", "MSTR" 
+    "NVDA", "AMD", "TSM", "SMCI", "AVGO", "ARM",
+    "PLTR", "AI", "PATH",
+    "BABA", "PDD", "BIDU", "NIO", "LI", "XPEV",
+    "COIN", "MARA", "MSTR"
 ]
 
 # --- 全局变量 ---
@@ -96,39 +118,95 @@ def get_user_data(user_id):
         settings["users"][uid_str] = {"stocks": [], "daily_status": {}}
     return settings["users"][uid_str]
 
-# --- [新增] FMP 实时价格查询工具 ---
-async def fetch_fmp_quotes(symbols: list):
-    """批量获取 FMP 实时报价"""
-    if not symbols: return []
+# --- [核心优化] 异步批量获取历史数据 + Bug修复 ---
+async def fetch_historical_batch(symbols: list, days=400):
+    if not symbols: return {}
     
-    # FMP 支持逗号分隔，建议一次不要超过 50-100 个，这里做简单分片处理
-    chunk_size = 50
-    all_quotes = []
+    # FMP v3 historical-price-full 支持批量，建议分片 (50-100)
+    chunk_size = 50 
+    results = {}
     
+    now = datetime.now()
+    from_date = (now - timedelta(days=days)).strftime("%Y-%m-%d")
+    to_date = now.strftime("%Y-%m-%d")
+
     async with aiohttp.ClientSession() as session:
         for i in range(0, len(symbols), chunk_size):
             chunk = symbols[i:i + chunk_size]
             symbols_str = ",".join(chunk)
-            url = f"https://financialmodelingprep.com/api/v3/quote/{symbols_str}?apikey={FMP_API_KEY}"
+            # 使用 v3 接口以支持批量
+            url = f"https://financialmodelingprep.com/api/v3/historical-price-full/{symbols_str}?from={from_date}&to={to_date}&apikey={FMP_API_KEY}"
             
             try:
                 async with session.get(url) as response:
                     if response.status == 200:
                         data = await response.json()
-                        if isinstance(data, list):
-                            all_quotes.extend(data)
+                        
+                        # [Bug修复] 对应图片中的 FMP 返回结构判断逻辑
+                        # FMP 在单股票和多股票时返回结构不同，且有时会有 Error Message
+                        if isinstance(data, dict):
+                            if "Error Message" in data:
+                                print(f"FMP Error: {data['Error Message']}")
+                                continue
+                            if "historicalStockList" in data:
+                                items = data["historicalStockList"]
+                            elif "symbol" in data and "historical" in data:
+                                items = [data] # 转成 list 统一处理
+                            else:
+                                items = []
+                        elif isinstance(data, list):
+                            items = data
+                        else:
+                            items = []
+
+                        for item in items:
+                            sym = item.get('symbol')
+                            hist = item.get('historical', [])
+                            if not hist or not sym: continue
+                            
+                            df = pd.DataFrame(hist)
+                            # 必须确保有 date 字段
+                            if 'date' not in df.columns: continue
+                            
+                            df['date'] = pd.to_datetime(df['date'])
+                            df = df.set_index('date').sort_index(ascending=True)
+                            
+                            # 计算指标
+                            df = calculate_nx_indicators(df)
+                            results[sym] = df
+            except Exception as e:
+                print(f"Error fetching batch {chunk}: {e}")
+                
+    return results
+
+# --- [保留] 实时价格查询 (Watchlist用) ---
+async def fetch_fmp_quotes(symbols: list):
+    if not symbols: return []
+    chunk_size = 50
+    all_quotes = []
+    async with aiohttp.ClientSession() as session:
+        for i in range(0, len(symbols), chunk_size):
+            chunk = symbols[i:i + chunk_size]
+            symbols_str = ",".join(chunk)
+            url = f"https://financialmodelingprep.com/stable/quote?symbol={symbols_str}&apikey={FMP_API_KEY}"
+            try:
+                async with session.get(url) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        if isinstance(data, list): all_quotes.extend(data)
             except Exception as e:
                 print(f"Error fetching quotes: {e}")
-                
     return all_quotes
 
 # --- 核心指标计算 ---
 def calculate_nx_indicators(df):
+    # 基础均线
     df['Nx_Blue_UP'] = df['high'].ewm(span=24, adjust=False).mean()
     df['Nx_Blue_DW'] = df['low'].ewm(span=23, adjust=False).mean()
     df['Nx_Yellow_UP'] = df['high'].ewm(span=89, adjust=False).mean()
     df['Nx_Yellow_DW'] = df['low'].ewm(span=90, adjust=False).mean()
     
+    # MACD
     price_col = 'close'
     exp12 = df[price_col].ewm(span=12, adjust=False).mean()
     exp26 = df[price_col].ewm(span=26, adjust=False).mean()
@@ -136,27 +214,46 @@ def calculate_nx_indicators(df):
     df['DEA'] = df['DIF'].ewm(span=9, adjust=False).mean()
     df['MACD'] = (df['DIF'] - df['DEA']) * 2
     
+    # RSI
     delta = df[price_col].diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
     rs = gain / loss
     df['RSI'] = 100 - (100 / (1 + rs))
     
+    # 成交量均线
     df['Vol_MA20'] = df['volume'].rolling(window=20).mean()
-    
     return df
 
-# --- [重写] 机构级形态识别算法 ---
-def identify_patterns(df, window=60):
+# --- [核心优化] 线性回归趋势线计算 (图片建议：信号质量升级) ---
+def linreg_trend(points, min_r2):
     """
-    严格版形态识别：旗形/楔形突破
-    修正：使用索引进行线性回归，避免日期非线性导致的误差
+    使用线性回归计算趋势线
+    返回: (slope, intercept, r_sq) 或 None
     """
+    if len(points) < 4: return None
+    
+    # 构造 X 轴 (0, 1, 2...)
+    x = np.arange(len(points))
+    y = points.values
+    
+    slope, intercept, r_value, p_value, std_err = linregress(x, y)
+    r_sq = r_value ** 2
+    
+    # [质量控制] 过滤拟合度太差的 (R^2 < 0.7)
+    if r_sq < min_r2: return None
+    
+    return slope, intercept, r_sq
+
+# --- [重写] 机构级形态识别 (引入 Scipy 线性回归) ---
+def identify_patterns(df):
+    window = CONFIG["pattern"]["window"]
+    min_r2 = CONFIG["pattern"]["min_r2"]
+    
     if len(df) < window + 5: return None, [], []
     
     recent = df.tail(window).copy()
-    # 重置索引为 0, 1, 2... 以进行准确的线性回归
-    recent = recent.reset_index() 
+    recent = recent.reset_index() # index 变成 0,1,2...
     
     # 寻找局部极值
     recent['pivot_high'] = recent['high'].rolling(5, center=True).max() == recent['high']
@@ -165,102 +262,117 @@ def identify_patterns(df, window=60):
     high_points = recent[recent['pivot_high']]
     low_points = recent[recent['pivot_low']]
     
-    # --- 策略: 旗形/楔形收敛突破 ---
     if len(high_points) >= 3 and len(low_points) >= 3:
-        # 取最后3个点来判断趋势更稳
-        h_last = high_points.iloc[-1]
-        h_prev = high_points.iloc[-3] # 取间隔一个高点，跨度更大
-        l_last = low_points.iloc[-1]
-        l_prev = low_points.iloc[-3]
+        # 取最近的 N 个极值点进行拟合 (例如最近8个)
+        h_data = high_points['high'].tail(8)
+        l_data = low_points['low'].tail(8)
         
-        # 1. 压力线向下倾斜 (高点降低)
-        if h_last['high'] < h_prev['high']:
-            # 计算压力线斜率 (y = mx + b)
-            slope_res = (h_last['high'] - h_prev['high']) / (h_last.name - h_prev.name)
-            intercept_res = h_prev['high'] - slope_res * h_prev.name
+        # 使用线性回归拟合压力线和支撑线
+        res_trend = linreg_trend(h_data, min_r2)
+        sup_trend = linreg_trend(l_data, min_r2)
+        
+        if res_trend and sup_trend:
+            slope_res, int_res, r2_res = res_trend
+            slope_sup, int_sup, r2_sup = sup_trend
             
-            # 计算支撑线斜率
-            slope_sup = (l_last['low'] - l_prev['low']) / (l_last.name - l_prev.name)
+            # [收敛判断逻辑]
+            # 1. 压力线向下 (斜率 < 0)
+            # 2. 支撑线向上 (斜率 > 0) 或走平
+            # 3. 确实收敛: 支撑斜率 > 压力斜率 + 阈值
+            # 4. 拟合度高: R^2 > 0.7 (已经在 linreg_trend 中过滤)
             
-            # 2. 收敛形态: 支撑线斜率 > 压力线斜率 (这就构成了收敛)
-            # 且收敛角度不能太小
-            if slope_sup > slope_res and (slope_sup - slope_res) > 0.05:
+            if slope_res < 0 and (slope_sup > slope_res + CONFIG["filter"]["min_converge_angle"]):
                 
-                # 3. 计算今天的理论阻力位
+                # 计算今日理论突破位
                 curr_idx = recent.index[-1]
-                resistance_today = slope_res * curr_idx + intercept_res
+                resistance_today = slope_res * curr_idx + int_res
                 
                 curr_close = recent['close'].iloc[-1]
                 curr_vol = recent['volume'].iloc[-1]
                 vol_ma = recent['Vol_MA20'].iloc[-1]
                 
-                # 4. 突破前一根K线必须在通道内 (防止已经是突破后的第N天)
-                prev_close = recent['close'].iloc[-2]
+                # [突破确认]
+                # 1. 前一天收盘价在压力线下方 (防止已经是突破后的行情)
                 prev_idx = recent.index[-2]
-                resistance_prev = slope_res * prev_idx + intercept_res
+                res_prev = slope_res * prev_idx + int_res
+                prev_close = recent['close'].iloc[-2]
                 
-                if prev_close <= resistance_prev:
-                    # 5. 突破 + 放量
-                    if curr_close > resistance_today and curr_vol > vol_ma * 1.3:
-                        # 转换回原始 DataFrame 的时间索引用于画图
-                        t1 = recent['date'].iloc[h_prev.name]
-                        p1 = h_prev['high']
+                if prev_close <= res_prev * 1.02: # 允许2%误差
+                    # 2. 今天收盘突破 + 放量
+                    if curr_close > resistance_today and curr_vol > vol_ma * CONFIG["filter"]["min_vol_ratio"]:
+                        
+                        # 构造画线数据 (取拟合段的起点和终点，绘制延长线)
+                        start_idx = recent.index[0]
+                        end_idx = recent.index[-1]
+                        
+                        # 转换回时间坐标
+                        t1 = recent['date'].iloc[0]
+                        p1 = slope_res * start_idx + int_res
                         t2 = recent['date'].iloc[-1]
-                        p2 = resistance_today
+                        p2 = slope_res * end_idx + int_res
                         
-                        t3 = recent['date'].iloc[l_prev.name]
-                        p3 = l_prev['low']
-                        t4 = recent['date'].iloc[l_last.name]
-                        p4 = l_last['low']
+                        t3 = recent['date'].iloc[0]
+                        p3 = slope_sup * start_idx + int_sup
+                        t4 = recent['date'].iloc[-1]
+                        p4 = slope_sup * end_idx + int_sup
                         
-                        # 返回两根线：压力线(白) 和 支撑线(辅助)
-                        # 格式: [[(d1,p1), (d2,p2)], [(d3,p3), (d4,p4)]]
-                        return "🚩 **放量旗形突破**: 机构级信号 (收敛+放量)", [[(t1,p1), (t2,p2)]], [[(t3,p3), (t4,p4)]]
+                        return "🚩 **放量旗形突破(机构算法)**", [[(t1,p1), (t2,p2)]], [[(t3,p3), (t4,p4)]]
 
     return None, [], []
 
+# --- [重写] 信号检查 (严格遵循优先级表) ---
 def check_signals(df):
     if len(df) < 60: return False, "", "NONE", [], []
     
     curr = df.iloc[-1]
     prev = df.iloc[-2]
-    
     triggers = []
     level = "NORMAL"
     
-    # 基础过滤: 剔除已暴涨股 (60日涨幅过大)
+    # === 优先级 1: 风控 (保命第一) ===
+    
+    # 1.1 60日暴涨过滤
     low_60 = df['low'].tail(60).min()
-    if curr['close'] > low_60 * 1.4: return False, "", "NONE", [], []
+    if curr['close'] > low_60 * CONFIG["filter"]["max_60d_gain"]: 
+        return False, "", "RISK_FILTER", [], []
 
-    # --- 1. 识别形态 (新增优化) ---
-    pattern_name, res_line, sup_line = identify_patterns(df)
-    if pattern_name:
-        triggers.append(pattern_name)
-        level = "S_TIER" # 机构级形态 S 级
+    # 1.2 [新增] 3日短期暴涨过滤 (防止追高接盘)
+    gain_3d = df['close'].pct_change(3).iloc[-1]
+    if gain_3d > CONFIG["filter"]["max_3d_gain"]:
+        return False, "", "RISK_FILTER", [], []
+        
+    # 1.3 [新增] 当日情绪过热/跌停 (天地板过滤)
+    day_change = abs((curr['close'] - prev['close']) / prev['close'])
+    if day_change > CONFIG["filter"]["max_day_change"]:
+        return False, "", "RISK_FILTER", [], []
 
-    # --- 2. [新增] 突破后回踩不破 (二次确认神级策略) ---
-    # 逻辑：过去 10 天曾经突破过蓝色梯子，但最近几天回调到了蓝色梯子附近，且今天再次放量上涨
-    # 这是一个非常棒的“上车点”
+    # === 优先级 2: GOD_TIER (二次起爆) ===
     recent_10 = df.tail(10)
-    # 检查是否有某天收盘 > 上沿
+    # 过去10天曾经突破过蓝梯上沿
     had_breakout = (recent_10['close'] > recent_10['Nx_Blue_UP']).any()
-    
-    # 当前刚好在梯子附近 (支撑位)
+    # 当前回踩蓝梯 (在蓝梯上下沿之间，或者贴近下沿)
     on_support = curr['close'] > curr['Nx_Blue_DW'] and curr['low'] <= curr['Nx_Blue_UP'] * 1.02
-    
-    # 再次放量启动
+    # 再次放量
     re_volume = curr['volume'] > curr['Vol_MA20'] * 1.5
     
     if had_breakout and on_support and re_volume:
-        triggers.append(f"🚀 **二次起爆**: 突破回踩确认支撑，放量拉升！")
-        level = "GOD_TIER" # 比 S 还高一级
+        triggers.append(f"👑 **二次起爆**: 蓝梯回踩确认 + 放量启动")
+        level = "GOD_TIER"
 
-    # --- 3. Nx 趋势 (基础) ---
+    # === 优先级 3: S_TIER (旗形/楔形突破) ===
+    # 只有没触发 GOD_TIER 时才判定 S_TIER，或者叠加
+    pattern_name, res_line, sup_line = identify_patterns(df)
+    if pattern_name:
+        triggers.append(pattern_name)
+        if level != "GOD_TIER": level = "S_TIER"
+
+    # === 优先级 4: A_TIER (Nx 蓝梯突破) ===
     is_downtrend = curr['close'] < curr['Nx_Blue_DW'] 
     if prev['close'] < prev['Nx_Blue_UP'] and curr['close'] > curr['Nx_Blue_UP']:
-        triggers.append(f"📈 **Nx 突破**: 站稳蓝色牛熊线")
-            
-    # --- 4. Cd/MACD 底背离 ---
+        triggers.append(f"📈 **Nx 蓝梯突破**: 趋势转多确认")
+        if level not in ["GOD_TIER", "S_TIER"]: level = "A_TIER"
+
+    # === 优先级 5: B_TIER (Cd/MACD 底背离) ===
     low_20 = df['low'].tail(20).min()
     price_is_low = curr['low'] <= low_20 * 1.01
     dif_20_min = df['DIF'].tail(20).min()
@@ -269,30 +381,31 @@ def check_signals(df):
     
     if price_is_low and divergence and momentum_turn:
         if is_downtrend or curr['RSI'] < 35:
-             triggers.append(f"💎 **Cd 结构底背离**: 股价新低但指标背离")
+             triggers.append(f"💎 **Cd 结构底背离**: 底部反转信号")
+             if level not in ["GOD_TIER", "S_TIER", "A_TIER"]: level = "B_TIER"
 
-    # --- 5. 弘历直接买 ---
+    # === 优先级 6: C_TIER (RSI 弘历战法) ===
     if prev['RSI'] < 30 and curr['RSI'] > 30:
-        if is_downtrend and "Cd" not in str(triggers):
-            triggers.append(f"⚠️ **RSI 超卖反弹**: 趋势仍偏空")
-        else:
-            triggers.append(f"🚀 **弘历战法**: RSI金叉")
-            
+        triggers.append(f"🚀 **RSI 弘历战法**: 超卖金叉")
+        if level == "NORMAL": level = "C_TIER" # 最低优先级
+
+    # === 优先级 7: 尾部风控 (弱信号过滤) ===
     if triggers:
-        # 过滤弱信号
-        if is_downtrend and len(triggers) < 2 and "S_TIER" not in level and "GOD_TIER" not in level:
-            return False, "", "NONE", [], []
+        # 如果是空头趋势，且不是神级或S级信号，必须有2个以上共振才报
+        if is_downtrend and len(triggers) < 2 and level not in ["GOD_TIER", "S_TIER"]:
+            return False, "", "WEAK_SIGNAL", [], []
+            
         return True, "\n".join(triggers), level, res_line, sup_line
 
     return False, "", "NONE", [], []
 
-def generate_chart(df, ticker, res_line=[], sup_line=[]):
+# --- 异步画图 (图片建议：小优化) ---
+def _generate_chart_sync(df, ticker, res_line=[], sup_line=[]):
     filename = f"{ticker}_alert.png"
     s = mpf.make_marketcolors(up='r', down='g', inherit=True)
     my_style = mpf.make_mpf_style(base_mpl_style="ggplot", marketcolors=s, gridstyle=":")
     
     plot_df = df.tail(80)
-    
     add_plots = [
         mpf.make_addplot(plot_df['Nx_Blue_UP'], color='dodgerblue', width=1.0),
         mpf.make_addplot(plot_df['Nx_Blue_DW'], color='dodgerblue', width=1.0),
@@ -303,66 +416,23 @@ def generate_chart(df, ticker, res_line=[], sup_line=[]):
         mpf.make_addplot(plot_df['DEA'], panel=2, color='blue'),
     ]
     
-    # 修复画线逻辑：确保传入的是 list of lists of tuples
-    # 并且只在 plot_df 范围内画，虽然 mplfinance 会自动裁剪，但为了安全
-    
     lines_to_draw = []
-    if res_line: lines_to_draw.extend(res_line) # res_line 本身已经是 [[(t1,p1), (t2,p2)]] 格式
+    if res_line: lines_to_draw.extend(res_line) 
     if sup_line: lines_to_draw.extend(sup_line)
     
     kwargs = dict(
-        type='candle', 
-        style=my_style, 
-        title=f"{ticker} Analysis", 
-        ylabel='Price', 
-        addplot=add_plots, 
-        volume=True, 
-        panel_ratios=(6, 2, 2), 
-        savefig=filename
+        type='candle', style=my_style, title=f"{ticker} Analysis", ylabel='Price', 
+        addplot=add_plots, volume=True, panel_ratios=(6, 2, 2), savefig=filename
     )
-    
     if lines_to_draw:
-        # 正确写法：list of lists
         kwargs['alines'] = dict(alines=lines_to_draw, colors='white', linewidths=1.5, linestyle='--')
 
     mpf.plot(plot_df, **kwargs)
     return filename
 
-# --- 数据获取 (400天) ---
-
-def get_stock_data(ticker, days=200):
-    now = datetime.now()
-    end_date_str = now.strftime("%Y-%m-%d")
-    start_date_str = (now - timedelta(days=400)).strftime("%Y-%m-%d")
-    
-    url = (
-        f"https://financialmodelingprep.com/stable/historical-price-eod/full"
-        f"?symbol={ticker}&from={start_date_str}&to={end_date_str}&apikey={FMP_API_KEY}"
-    )
-    
-    print(f"🔍 [Debug] Requesting {ticker}...")
-    
-    try:
-        response = requests.get(url, timeout=10)
-        if response.status_code != 200: return None
-        data = response.json()
-        if not data: return None
-            
-        if isinstance(data, list):
-            df = pd.DataFrame(data)
-        elif isinstance(data, dict) and 'historical' in data:
-            df = pd.DataFrame(data['historical'])
-        else:
-            return None
-
-        if df.empty: return None
-
-        df = df.set_index('date').sort_index(ascending=True)
-        df.index = pd.to_datetime(df.index)
-        return calculate_nx_indicators(df)
-    except Exception as e:
-        print(f"❌ [Exception] {e}")
-        return None
+async def generate_chart(df, ticker, res_line=[], sup_line=[]):
+    # 放入线程池运行，避免阻塞主循环
+    return await asyncio.to_thread(_generate_chart_sync, df, ticker, res_line, sup_line)
 
 # --- Discord Client ---
 
@@ -387,20 +457,34 @@ class StockBotClient(discord.Client):
         
         is_pre = TIME_PRE_MARKET_START <= curr_time < TIME_MARKET_OPEN
         is_open = TIME_MARKET_OPEN <= curr_time <= TIME_MARKET_CLOSE
-        
         if not (is_pre or is_open): return
         
-        print(f"[{now_et.strftime('%H:%M')}] Scanning...")
-        ticker_user_map = defaultdict(list)
+        print(f"[{now_et.strftime('%H:%M')}] Scanning started...")
+        
+        # 1. 收集所有用户关注的股票
         users_data = settings.get("users", {})
+        all_tickers = set()
+        ticker_user_map = defaultdict(list)
         
         for uid, udata in users_data.items():
+            # 清理旧状态
             for k in list(udata['daily_status'].keys()):
                 if not k.endswith(today_str): del udata['daily_status'][k]
             for ticker in udata.get("stocks", []):
+                all_tickers.add(ticker)
                 ticker_user_map[ticker].append(uid)
 
-        for ticker, user_ids in ticker_user_map.items():
+        if not all_tickers: return
+
+        # 2. [批量获取] 使用 Async Batch 替代循环 Request
+        # 这一步是性能提升的关键，瞬间获取所有数据
+        data_map = await fetch_historical_batch(list(all_tickers))
+        
+        # 3. 处理数据
+        for ticker, df in data_map.items():
+            user_ids = ticker_user_map[ticker]
+            
+            # 检查是否每个人都推送过了
             all_alerted = True
             for uid in user_ids:
                 status_key = f"{ticker}-{today_str}"
@@ -410,16 +494,12 @@ class StockBotClient(discord.Client):
             
             if all_alerted: continue
 
-            df = get_stock_data(ticker)
-            if df is None:
-                # 核心修复：使用异步 sleep 防止卡死
-                await asyncio.sleep(1)
-                continue
-
+            # 信号检查
             is_triggered, reason, level, res_line, sup_line = check_signals(df)
             
             if is_triggered:
-                chart_file = generate_chart(df, ticker, res_line, sup_line)
+                # 异步生成图表
+                chart_file = await generate_chart(df, ticker, res_line, sup_line)
                 price = df['close'].iloc[-1]
                 nx_support = df['Nx_Blue_DW'].iloc[-1]
                 
@@ -439,11 +519,12 @@ class StockBotClient(discord.Client):
                 if users_to_ping:
                     save_settings()
                     mentions = " ".join([f"<@{uid}>" for uid in users_to_ping])
-                    emoji = "👑" if level == "GOD_TIER" else ("🔥" if level == "S_TIER" else "🚨")
-                    header = f"【{emoji} 神级K线系统】"
+                    
+                    # 使用配置中的 Emoji
+                    emoji = CONFIG["emoji"].get(level, "🚨")
                     
                     msg = (
-                        f"{mentions}\n{header}\n"
+                        f"{mentions}\n【{emoji} {level} 信号触发】\n"
                         f"🎯 **标的**: `{ticker}` | 💰 **现价**: `${price:.2f}`\n"
                         f"{'-'*25}\n{reason}\n{'-'*25}\n"
                         f"🌊 **Nx 蓝梯下沿**: `${nx_support:.2f}`"
@@ -452,12 +533,11 @@ class StockBotClient(discord.Client):
                         file = discord.File(chart_file)
                         await self.alert_channel.send(content=msg, file=file)
                     except Exception as e:
-                        print(f"Error: {e}")
+                        print(f"Error sending msg: {e}")
                     finally:
                         if os.path.exists(chart_file): os.remove(chart_file)
-            
-            # 核心修复：异步 sleep
-            await asyncio.sleep(1.2)
+        
+        print(f"[{now_et.strftime('%H:%M')}] Scan finished.")
 
 # --- 实例化 & 注册命令 ---
 
@@ -486,26 +566,6 @@ async def import_gods(interaction: discord.Interaction):
     save_settings()
     await interaction.followup.send(f"✅ 已添加神级热门股。")
 
-@client.tree.command(name="addstocks", description="添加关注股票 (legacy)")
-async def add_stocks(interaction: discord.Interaction, tickers: str):
-    await interaction.response.defer()
-    user_data = get_user_data(interaction.user.id)
-    new_list = list(set([t.strip().upper() for t in tickers.replace(',', ' ').split() if t.strip()]))
-    current_set = set(user_data["stocks"])
-    current_set.update(new_list)
-    user_data["stocks"] = list(current_set)
-    save_settings()
-    await interaction.followup.send(f"✅ 已添加！新增: `{', '.join(new_list)}`")
-
-@client.tree.command(name="liststocks", description="查看关注列表 (legacy)")
-async def list_stocks(interaction: discord.Interaction):
-    stocks = get_user_data(interaction.user.id)["stocks"]
-    if len(stocks) > 60:
-        display_str = ", ".join(stocks[:60]) + f"... (共 {len(stocks)} 只)"
-    else:
-        display_str = ", ".join(stocks) if stocks else '空'
-    await interaction.response.send_message(f"📋 **关注列表**:\n`{display_str}`", ephemeral=True)
-
 @client.tree.command(name="clearstocks", description="清空关注列表")
 async def clear_stocks(interaction: discord.Interaction):
     user_data = get_user_data(interaction.user.id)
@@ -514,12 +574,11 @@ async def clear_stocks(interaction: discord.Interaction):
     save_settings()
     await interaction.response.send_message("🗑️ 已清空。", ephemeral=True)
 
-# --- [新增] Watch 系列命令 (操作同样的数据源) ---
+# --- Watch 系列命令 ---
 
 @client.tree.command(name="watch_add", description="批量添加关注 (例如: AAPL, TSLA)")
 @app_commands.describe(codes="股票代码，用逗号或空格分隔")
 async def watch_add(interaction: discord.Interaction, codes: str):
-    # 复用 addstocks 的逻辑，保持数据一致
     await interaction.response.defer()
     user_data = get_user_data(interaction.user.id)
     new_list = list(set([t.strip().upper() for t in codes.replace(',', ' ').replace('，', ' ').split() if t.strip()]))
@@ -529,7 +588,7 @@ async def watch_add(interaction: discord.Interaction, codes: str):
     user_data["stocks"] = list(current_set)
     save_settings()
     
-    await interaction.followup.send(f"✅ 已关注: `{', '.join(new_list)}` (同时也加入了自动监控队列)")
+    await interaction.followup.send(f"✅ 已关注: `{', '.join(new_list)}`")
 
 @client.tree.command(name="watch_remove", description="从关注列表移除代码")
 @app_commands.describe(codes="股票代码，用逗号或空格分隔")
@@ -550,7 +609,6 @@ async def watch_remove(interaction: discord.Interaction, codes: str):
 
 @client.tree.command(name="watch_list", description="查看我的关注列表")
 async def watch_list(interaction: discord.Interaction):
-    # 复用 list_stocks 逻辑
     stocks = get_user_data(interaction.user.id)["stocks"]
     if len(stocks) > 60:
         display_str = ", ".join(stocks[:60]) + f"... (共 {len(stocks)} 只)"
@@ -567,33 +625,28 @@ async def watch_price(interaction: discord.Interaction):
 
     await interaction.response.defer()
     
-    # 获取报价
+    # 获取报价 (调用新的 fetch_fmp_quotes)
     quotes = await fetch_fmp_quotes(stocks)
     
     if not quotes:
         await interaction.followup.send("❌ 无法获取数据 (API错误或代码无效)。")
         return
 
-    # 构建 Embed 表格
     embed = discord.Embed(title="📈 实时行情 (Watchlist)", color=0x00ff00)
     embed.set_footer(text="Data provided by Financial Modeling Prep")
     
-    # 简单的文本排版
     msg_lines = []
     for q in quotes:
         symbol = q.get('symbol')
         price = q.get('price')
         change_p = q.get('changesPercentage')
         
-        # 图标逻辑
         icon = "🟢" if change_p and change_p > 0 else "🔴"
         if change_p == 0: icon = "⚪"
         
-        # 格式化
         line = f"{icon} **{symbol}**: `${price}` ({change_p}%)"
         msg_lines.append(line)
 
-    # Discord Embed 有 4096 字符限制，如果太长需要截断
     full_text = "\n".join(msg_lines)
     if len(full_text) > 4000:
         full_text = full_text[:4000] + "\n... (列表过长截断)"
@@ -605,22 +658,25 @@ async def watch_price(interaction: discord.Interaction):
 async def test_command(interaction: discord.Interaction, ticker: str):
     await interaction.response.defer()
     ticker = ticker.upper().strip()
-    df = get_stock_data(ticker)
     
-    if df is None:
+    # 测试时也复用 batch 逻辑，虽然只有一个
+    data_map = await fetch_historical_batch([ticker])
+    if not data_map or ticker not in data_map:
         await interaction.followup.send(f"❌ 获取 `{ticker}` 失败。")
         return
         
-    _, _, _, res_line, sup_line = check_signals(df)
+    df = data_map[ticker]
+    is_triggered, reason, level, res_line, sup_line = check_signals(df)
     
-    chart_file = generate_chart(df, ticker, res_line, sup_line)
+    chart_file = await generate_chart(df, ticker, res_line, sup_line)
     last_row = df.iloc[-1]
     
     msg = (
         f"✅ **接口测试正常** | `{ticker}`\n"
+        f"📊 **信号状态**: {level}\n"
         f"💰 收盘: `${last_row['close']:.2f}`\n"
         f"🌊 Nx蓝梯: `${last_row['Nx_Blue_DW']:.2f}` ~ `${last_row['Nx_Blue_UP']:.2f}`\n"
-        f"📉 RSI: `{last_row['RSI']:.2f}`"
+        f"📝 **触发理由**: \n{reason if reason else '无触发'}"
     )
     
     try:
