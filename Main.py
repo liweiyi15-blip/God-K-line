@@ -63,7 +63,10 @@ CONFIG = {
         "min_vol_ratio": 1.3,
         "intraday_vol_ratio_normal": 1.8,
         "intraday_vol_ratio_open": 3.5,
-        "min_converge_angle": 0.05
+        "min_converge_angle": 0.05,
+        # [新增] BB 和 ADX 策略阈值
+        "min_bb_squeeze_width": 0.08, 
+        "min_adx_for_squeeze": 15
     },
     "pattern": {
         "min_r2": 0.70,
@@ -78,15 +81,16 @@ CONFIG = {
     "SCORE": { 
         "MIN_ALERT_SCORE": 70, # 最低报警分数
         "WEIGHTS": {
-            "GOD_TIER_NX": 40,   # Nx 趋势起爆 (最高权重)
+            "GOD_TIER_NX": 40,    # Nx 趋势起爆 (最高权重)
             "PATTERN_BREAK": 25, # 旗形突破
-            "BB_SQUEEZE": 15,    # BB 紧缩突破
-            "STRONG_ADX": 10,    # ADX > 30 趋势确认
+            "BB_SQUEEZE": 15,     # BB 紧缩突破
+            "STRONG_ADX": 10,     # ADX > 30 趋势确认
             "HEAVY_VOLUME": 10,  # 相对成交量 > 2.0 (额外加成)
             "KDJ_REBOUND": 8,    # KDJ 绝地反击
+            "MACD_ZERO_CROSS": 8, # [新增] MACD 零轴金叉
             "NX_BREAKOUT": 7,    # Nx 蓝梯突破 (普通)
             "MACD_DIVERGE": 5,   # MACD 底背离
-            "CAPITULATION": 12   # 抛售高潮
+            "CAPITULATION": 12    # 抛售高潮
         },
         "EMOJI": {
             100: "👑", 90: "🔥", 80: "📈", 70: "💎", 60: "🚀"
@@ -232,6 +236,7 @@ def process_dataframe_sync(hist_data):
 def merge_and_recalc_sync(df, quote):
     if df is None or quote is None: return df
     try:
+        # FMP quote timestamp is UTC
         quote_time = pd.to_datetime(quote['timestamp'], unit='s').tz_localize('UTC').tz_convert(MARKET_TIMEZONE)
         quote_date = quote_time.normalize().tz_localize(None) 
         
@@ -256,9 +261,18 @@ def merge_and_recalc_sync(df, quote):
         df_mod = df.copy()
         
         if last_date == quote_date:
+            # 更新当天数据
             for col in ['open', 'high', 'low', 'close', 'volume']:
-                df_mod.at[last_idx, col] = new_row[col]
+                # 确保高点和低点更新是正确的 (取 max/min)
+                if col == 'high':
+                    df_mod.at[last_idx, col] = max(df_mod.at[last_idx, col], new_row[col])
+                elif col == 'low':
+                    df_mod.at[last_idx, col] = min(df_mod.at[last_idx, col], new_row[col])
+                else:
+                    df_mod.at[last_idx, col] = new_row[col]
+
         elif last_date < quote_date:
+            # 添加新的一天数据
             new_df = pd.DataFrame([new_row])
             new_df = new_df.set_index('date')
             df_mod = pd.concat([df_mod, new_df])
@@ -272,15 +286,34 @@ def merge_and_recalc_sync(df, quote):
         logging.error(f"[Merge Error] {e}")
         return df
 
+def _safely_process_fmp_data(data, sym):
+    """[新增] 同步函数：安全地处理 FMP 原始数据并转换为 DataFrame"""
+    try:
+        if isinstance(data, list) and len(data) > 0 and 'date' in data[0] and 'close' in data[0]:
+            return process_dataframe_sync(data)
+        elif isinstance(data, dict) and 'historical' in data:
+            return process_dataframe_sync(data['historical'])
+        elif isinstance(data, list) and len(data) > 0 and 'historical' in data[0]:
+            for item in data:
+                if item.get('symbol') == sym:
+                    return process_dataframe_sync(item['historical'])
+                    
+        return None
+    except Exception as e:
+        logging.error(f"[Data Process Error] {sym}: {e}")
+        return None
+
 async def fetch_historical_batch(symbols: list, days=None):
     if not symbols: return {}
     if days is None: days = CONFIG["system"]["history_days"]
     
     results = {}
     now = datetime.now()
-    from_date = (now - timedelta(days=days)).strftime("%Y-%m-%d")
+    # 增加额外几天历史数据，确保指标计算的准确性
+    from_date = (now - timedelta(days=days + 60)).strftime("%Y-%m-%d") 
     to_date = now.strftime("%Y-%m-%d")
     
+    # [优化] 连接数限制
     connector = aiohttp.TCPConnector(limit=15)
     semaphore = asyncio.Semaphore(15)
     
@@ -290,6 +323,7 @@ async def fetch_historical_batch(symbols: list, days=None):
     }
 
     async def fetch_single(session, sym):
+        # 确保使用 stable 接口
         url = f"https://financialmodelingprep.com/stable/historical-price-eod/full?symbol={sym}&from={from_date}&to={to_date}&apikey={FMP_API_KEY}"
         async with semaphore:
             try:
@@ -301,16 +335,9 @@ async def fetch_historical_batch(symbols: list, days=None):
                         
                     if response.status == 200:
                         data = await response.json()
-                        df = None
-                        if isinstance(data, list) and len(data) > 0 and 'date' in data[0] and 'close' in data[0]:
-                            df = await asyncio.to_thread(process_dataframe_sync, data)
-                        elif isinstance(data, dict) and 'historical' in data:
-                            df = await asyncio.to_thread(process_dataframe_sync, data['historical'])
-                        elif isinstance(data, list) and len(data) > 0 and 'historical' in data[0]:
-                            for item in data:
-                                if item.get('symbol') == sym:
-                                    df = await asyncio.to_thread(process_dataframe_sync, item['historical'])
-                                    break
+                        # [优化] 将数据解析和DF构建放入线程池
+                        df = await asyncio.to_thread(_safely_process_fmp_data, data, sym)
+
                         if df is not None and not df.empty:
                             results[sym] = df
                         else:
@@ -389,6 +416,7 @@ def identify_patterns(df):
             slope_res, int_res, r2_res = res_trend
             slope_sup, int_sup, r2_sup = sup_trend
             
+            # 旗形/三角收敛形态：阻力线向下倾斜，支撑线平缓或向上倾斜
             if slope_res < 0 and (slope_sup > slope_res + CONFIG["filter"]["min_converge_angle"]):
                 curr_idx = recent.index[-1]
                 resistance_today = slope_res * curr_idx + int_res
@@ -398,17 +426,27 @@ def identify_patterns(df):
                 res_prev = slope_res * prev_idx + int_res
                 prev_close = recent['close'].iloc[-2]
                 
+                # 突破条件：昨天收盘价在阻力线下方，今天收盘价在阻力线上方
                 if prev_close <= res_prev * 1.02:
                     if curr_close > resistance_today:
                         t1, t2 = recent['date'].iloc[0], recent['date'].iloc[-1]
-                        p1, p2 = slope_res * recent.index[0] + int_res, slope_res * recent.index[-1] + int_res
-                        t3, t4 = t1, t2
-                        p3, p4 = slope_sup * recent.index[0] + int_sup, slope_sup * recent.index[-1] + int_sup
-                        return "🚩 **放量旗形突破(机构算法)**", [[(t1,p1), (t2,p2)]], [[(t3,p3), (t4,p4)]]
+                        # 确保趋势线从第一个数据点开始
+                        start_idx = recent.index[0] 
+                        p1_res = slope_res * start_idx + int_res
+                        p1_sup = slope_sup * start_idx + int_sup
+
+                        p2_res = slope_res * curr_idx + int_res
+                        p2_sup = slope_sup * curr_idx + int_sup
+                        
+                        # 格式化 trend lines
+                        res_line = [[(t1, p1_res), (t2, p2_res)]]
+                        sup_line = [[(t1, p1_sup), (t2, p2_sup)]]
+                        
+                        return "🚩 **放量旗形突破(机构算法)**", res_line, sup_line
     return None, [], []
 
 def get_volume_projection_factor(ny_now, minutes_elapsed):
-    """[新增] 采用分段/动态成交量推算公式"""
+    """[优化] 采用分段/动态成交量推算公式"""
     
     # 市场开放总分钟数
     TOTAL_MINUTES = 390
@@ -466,6 +504,10 @@ def check_signals_sync(df):
         projection_factor = get_volume_projection_factor(ny_now, safe_minutes)
         vol_threshold = CONFIG["filter"]["intraday_vol_ratio_normal"] 
         
+        # [优化] 趋势量修正 (ADX 越高，推算因子越小，越容易触发)
+        trend_modifier = 1 - (min(curr['ADX'], 40) - 20) / 200 # ADX 20->1.0, 40->0.9
+        projection_factor *= max(0.8, trend_modifier) # 限制最低修正到 0.8 倍
+
         proj_vol = curr['volume'] * projection_factor
     else:
         proj_vol = curr['volume']
@@ -480,10 +522,13 @@ def check_signals_sync(df):
     # --- 策略部分 ---
 
     # 策略 1: BB Squeeze (增强版: 需要 ADX 确认)
-    if curr['BB_Width'] < 0.08:
+    bb_min_width = CONFIG["filter"]["min_bb_squeeze_width"]
+    adx_min_squeeze = CONFIG["filter"]["min_adx_for_squeeze"]
+    
+    if curr['BB_Width'] < bb_min_width:
         if curr['close'] > curr['BB_Up'] and is_heavy_volume:
-            if curr['ADX'] > 15 and curr['PDI'] > curr['MDI']:
-                triggers.append(f"🚀 **BB Squeeze (Trend Confirm)**: 紧缩突破 + 趋势增强")
+            if curr['ADX'] > adx_min_squeeze and curr['PDI'] > curr['MDI']:
+                triggers.append(f"🚀 **BB Squeeze (Trend Confirm)**: 紧缩突破 + 趋势增强(ADX:{curr['ADX']:.1f})")
                 score += weights["BB_SQUEEZE"]
 
     # 策略 2: Nx 蓝梯 (超强趋势起爆)
@@ -513,8 +558,14 @@ def check_signals_sync(df):
         if curr['PDI'] > curr['MDI']:
             triggers.append(f"📈 **Nx 蓝梯突破**: 趋势转多确认")
             score += weights["NX_BREAKOUT"]
+    
+    # 策略 4: MACD 零轴金叉 [新增]
+    if prev['DIF'] < 0 and curr['DIF'] > 0 and curr['DIF'] > curr['DEA']:
+        if curr['RSI'] < 70:
+            triggers.append(f"🟢 **MACD 零轴金叉**: 中线多头启动")
+            score += weights["MACD_ZERO_CROSS"]
 
-    # 策略 4: KDJ / MACD
+    # 策略 5: KDJ / MACD
     price_low_20 = df['close'].tail(20).min()
     price_is_low = curr['close'] <= price_low_20 * 1.02
     
@@ -529,7 +580,7 @@ def check_signals_sync(df):
                  triggers.append(f"🛡️ **Cd 结构底背离**: 价格新低动能衰竭")
                  score += weights["MACD_DIVERGE"]
 
-    # 策略 5: 抛售高潮 (小盘股)
+    # 策略 6: 抛售高潮 (小盘股)
     pinbar_ratio = (curr['close'] - curr['low']) / (curr['high'] - curr['low'] + 1e-9)
     market_cap = df.attrs.get('marketCap', float('inf')) 
     
@@ -573,14 +624,17 @@ def _generate_chart_sync(df, ticker, res_line=[], sup_line=[]):
     
     kwargs = dict(type='candle', style=my_style, title=f"{ticker} Analysis", ylabel='Price', addplot=add_plots, volume=True, panel_ratios=(6, 2, 2), tight_layout=True, savefig=buf)
     
-    # 【优化点】确保 alines 被正确传递和合并
-    all_lines = []
-    if res_line: all_lines.extend(res_line)
-    if sup_line: all_lines.extend(sup_line)
+    # 【优化点】确保 alines 被正确传递和合并 (支持不同颜色)
+    alist = []
+    if res_line:
+        # 阻力线: 红色
+        alist.append(dict(alines=res_line, colors='red', linewidths=2.0, linestyle='-'))
+    if sup_line:
+        # 支撑线: 绿色
+        alist.append(dict(alines=sup_line, colors='green', linewidths=2.0, linestyle='-'))
         
-    if all_lines:
-        # 使用不同的颜色（例如：灰色）来区分趋势线
-        kwargs['alines'] = dict(alines=all_lines, colors='darkgray', linewidths=2.0, linestyle='-')
+    if alist:
+        kwargs['alines'] = alist
     
     try:
         mpf.plot(plot_df, **kwargs)
@@ -612,27 +666,33 @@ async def update_stats_data():
             need_20d = data.get("ret_20d") is None and (today - signal_date).days > 20
             if need_1d or need_5d or need_20d: symbols_to_check.add(ticker)
     if not symbols_to_check: return
-    data_map = await fetch_historical_batch(list(symbols_to_check), days=60)
+    # 请求时多增加几天，确保计算完整
+    data_map = await fetch_historical_batch(list(symbols_to_check), days=60) 
     for date_str, tickers_data in history.items():
         signal_date = datetime.strptime(date_str, "%Y-%m-%d").date()
         for ticker, data in tickers_data.items():
             if ticker not in data_map: continue
             df = data_map[ticker]
             try:
+                # 仅筛选信号日之后的数据
                 after_signal = df[df.index.date > signal_date]
                 if after_signal.empty: continue
                 signal_price = data['price']
                 if signal_price <= 0: continue
+                
+                # 确保取的是信号日之后的第一个交易日
                 if data.get("ret_1d") is None and len(after_signal) >= 1:
                     price_1d = after_signal.iloc[0]['close']
                     data["ret_1d"] = round(((price_1d - signal_price) / signal_price) * 100, 2)
                     updates_made = True
                 if data.get("ret_5d") is None and len(after_signal) >= 5:
-                    price_5d = after_signal.iloc[4]['close']
+                    # 确保是第5个交易日 (索引4)
+                    price_5d = after_signal.iloc[4]['close'] 
                     data["ret_5d"] = round(((price_5d - signal_price) / signal_price) * 100, 2)
                     updates_made = True
                 if data.get("ret_20d") is None and len(after_signal) >= 20:
-                    price_20d = after_signal.iloc[19]['close']
+                    # 确保是第20个交易日 (索引19)
+                    price_20d = after_signal.iloc[19]['close'] 
                     data["ret_20d"] = round(((price_20d - signal_price) / signal_price) * 100, 2)
                     updates_made = True
             except: pass
@@ -932,9 +992,9 @@ async def stats_command(interaction: discord.Interaction):
 
             if len(recent) < 8:
                 rets = []
-                if r1: rets.append(f"1D:{r1}%")
-                if r5: rets.append(f"1W:{r5}%")
-                if r20: rets.append(f"1M:{r20}%")
+                if r1 is not None: rets.append(f"1D:{r1}%")
+                if r5 is not None: rets.append(f"1W:{r5}%")
+                if r20 is not None: rets.append(f"1M:{r20}%")
                 ret_str = " | ".join(rets) if rets else "⏳"
                 recent.append(f"`{d}` {level_emoji} **{t}** ({score}分)\n╚ {ret_str}")
 
@@ -975,7 +1035,8 @@ async def test_command(interaction: discord.Interaction, ticker: str):
     atr_val = df['ATR'].iloc[-1] if 'ATR' in df.columns else (price * 0.05)
     stop_loss = price - (2 * atr_val)
 
-    if not reason: reason = "手动测试 (无信号)"
+    if not reason or score < CONFIG["SCORE"]["MIN_ALERT_SCORE"]: 
+        reason = f"信号触发失败 (Score: {score})。最高指标：RSI={df['RSI'].iloc[-1]:.1f}, ADX={df['ADX'].iloc[-1]:.1f}"
     
     chart_buf = await generate_chart(df, ticker, r_l, s_l)
     
