@@ -1,0 +1,14 @@
+# 敏感环境配置
+.env
+
+# Python 缓存
+__pycache__/
+*.py[cod]
+
+# 运行时生成的文件
+settings.json
+*.png
+*.log
+
+# Mac 系统文件
+.DS_Store
