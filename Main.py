@@ -29,7 +29,7 @@ try:
     ALERT_CHANNEL_ID = int(os.getenv("ALERT_CHANNEL_ID"))
 except (TypeError, ValueError):
     ALERT_CHANNEL_ID = 0
-    print("⚠️ [WARN] ALERT_CHANNEL_ID not set or invalid.")
+    print("⚠️ [WARN] ALERT_CHANNEL_ID not set or invalid.", flush=True)
 
 # --- 全局配置 ---
 MARKET_TIMEZONE = pytz.timezone('America/New_York')
@@ -93,7 +93,7 @@ def load_settings():
             settings = {"users": {}, "signal_history": {}}
             save_settings()
     except Exception as e:
-        print(f"Error loading settings: {e}")
+        print(f"Error loading settings: {e}", flush=True)
         settings = {"users": {}, "signal_history": {}}
 
 def save_settings():
@@ -104,7 +104,7 @@ def save_settings():
         with open(SETTINGS_FILE, 'w', encoding='utf-8') as f:
             json.dump(settings, f, indent=4)
     except Exception as e:
-        print(f"Error saving settings: {e}")
+        print(f"Error saving settings: {e}", flush=True)
 
 def get_user_data(user_id):
     uid_str = str(user_id)
@@ -210,12 +210,12 @@ def merge_and_recalc_sync(df, quote):
         return calculate_nx_indicators(df_mod)
         
     except Exception as e:
-        print(f"❌ [Merge Error] {e}")
+        print(f"❌ [Merge Error] {e}", flush=True)
         return df
 
 async def fetch_historical_batch(symbols: list, days=None):
     """
-    [ULTRA DEBUG] 打印详细 URL 和返回内容
+    [ULTRA DEBUG] 打印详细 URL 和返回内容 (强制 Flush)
     """
     if not symbols: return {}
     if days is None: days = CONFIG["system"]["history_days"]
@@ -242,8 +242,8 @@ async def fetch_historical_batch(symbols: list, days=None):
         
         async with semaphore:
             success = False
-            # 打印请求
-            # print(f"🔍 [发起请求 A] {url_a}") # 如果不想刷屏太快，注释掉这行，或者只在出错时看
+            # 强制打印发起请求
+            print(f"🔍 [发起请求 A] {url_a}", flush=True) 
             
             try:
                 async with session.get(url_a, ssl=False) as response:
@@ -264,22 +264,22 @@ async def fetch_historical_batch(symbols: list, days=None):
                                     if df is not None: results[sym] = df
                         else:
                              # 状态 200 但数据为空
-                             print(f"⚠️ [数据为空 A] {sym} | URL: {url_a}")
-                             print(f"📄 [返回内容 A] {str(data)[:300]}") # 打印前300字符
+                             print(f"⚠️ [数据为空 A] {sym} | URL: {url_a}", flush=True)
+                             print(f"📄 [返回内容 A] {str(data)[:300]}", flush=True)
                     else:
                         # 状态不是 200
                         error_text = await response.text()
-                        print(f"❌ [HTTP 错误 A] {sym} | Status: {response.status} | URL: {url_a}")
-                        print(f"📄 [返回内容 A] {error_text[:300]}")
+                        print(f"❌ [HTTP 错误 A] {sym} | Status: {response.status} | URL: {url_a}", flush=True)
+                        print(f"📄 [返回内容 A] {error_text[:300]}", flush=True)
 
             except Exception as e:
-                print(f"❌ [异常 A] {sym}: {e}")
+                print(f"❌ [异常 A] {sym}: {e}", flush=True)
 
             # 策略B URL
             if not success:
                 url_b = f"https://financialmodelingprep.com/stable/historical-price-eod/full/{sym}?from={from_date}&to={to_date}&apikey={FMP_API_KEY}"
                 
-                # print(f"🔍 [发起请求 B] {url_b}") # Debug
+                print(f"🔍 [发起请求 B] {url_b}", flush=True)
 
                 try:
                     async with session.get(url_b, ssl=False) as response_b:
@@ -290,22 +290,22 @@ async def fetch_historical_batch(symbols: list, days=None):
                             elif isinstance(data_b, list): items_b = data_b
                             
                             if items_b:
-                                print(f"✅ [RECOVER] {sym} 使用 Path 格式获取成功")
+                                print(f"✅ [RECOVER] {sym} 使用 Path 格式获取成功", flush=True)
                                 for item in items_b:
                                     hist = item.get('historical', [])
                                     if hist:
                                         df = await asyncio.to_thread(process_dataframe_sync, hist)
                                         if df is not None: results[sym] = df
                             else:
-                                print(f"⚠️ [数据为空 B] {sym} | URL: {url_b}")
-                                print(f"📄 [返回内容 B] {str(data_b)[:300]}")
+                                print(f"⚠️ [数据为空 B] {sym} | URL: {url_b}", flush=True)
+                                print(f"📄 [返回内容 B] {str(data_b)[:300]}", flush=True)
                         else:
                             error_text = await response_b.text()
-                            print(f"❌ [HTTP 错误 B] {sym} | Status: {response_b.status} | URL: {url_b}")
-                            print(f"📄 [返回内容 B] {error_text[:300]}")
+                            print(f"❌ [HTTP 错误 B] {sym} | Status: {response_b.status} | URL: {url_b}", flush=True)
+                            print(f"📄 [返回内容 B] {error_text[:300]}", flush=True)
 
                 except Exception as e:
-                      print(f"❌ [异常 B] {sym}: {e}")
+                      print(f"❌ [异常 B] {sym}: {e}", flush=True)
 
     async with aiohttp.ClientSession(headers=headers) as session:
         tasks_list = [fetch_single(session, sym) for sym in symbols]
@@ -315,7 +315,7 @@ async def fetch_historical_batch(symbols: list, days=None):
 
 async def fetch_realtime_quotes(symbols: list):
     """
-    [ULTRA DEBUG] 打印详细 URL 和返回内容
+    [ULTRA DEBUG] 打印详细 URL 和返回内容 (强制 Flush)
     """
     if not symbols: return {}
     
@@ -329,7 +329,7 @@ async def fetch_realtime_quotes(symbols: list):
     
     async def fetch_single_quote(session, sym):
         url = f"https://financialmodelingprep.com/stable/quote?symbol={sym}&apikey={FMP_API_KEY}"
-        # print(f"🔍 [发起请求 Quote] {url}") # Debug
+        print(f"🔍 [发起请求 Quote] {url}", flush=True)
         
         async with semaphore:
             try:
@@ -344,14 +344,14 @@ async def fetch_realtime_quotes(symbols: list):
                              s = data.get('symbol')
                              if s: quotes_map[s] = data
                         else:
-                             print(f"⚠️ [数据异常 Quote] {sym} | URL: {url}")
-                             print(f"📄 [返回内容 Quote] {str(data)[:300]}")
+                             print(f"⚠️ [数据异常 Quote] {sym} | URL: {url}", flush=True)
+                             print(f"📄 [返回内容 Quote] {str(data)[:300]}", flush=True)
                     else:
                         error_text = await response.text()
-                        print(f"❌ [HTTP 错误 Quote] {sym} | Status: {response.status} | URL: {url}")
-                        print(f"📄 [返回内容 Quote] {error_text[:300]}")
+                        print(f"❌ [HTTP 错误 Quote] {sym} | Status: {response.status} | URL: {url}", flush=True)
+                        print(f"📄 [返回内容 Quote] {error_text[:300]}", flush=True)
             except Exception as e:
-                print(f"❌ [异常 Quote] {sym}: {e}")
+                print(f"❌ [异常 Quote] {sym}: {e}", flush=True)
 
     async with aiohttp.ClientSession(headers=headers) as session:
         tasks_list = [fetch_single_quote(session, sym) for sym in symbols]
@@ -597,13 +597,13 @@ class StockBotClient(discord.Client):
 
     async def on_ready(self):
         load_settings()
-        print(f'Logged in as {self.user}')
+        print(f'Logged in as {self.user}', flush=True)
         if ALERT_CHANNEL_ID != 0:
             self.alert_channel = self.get_channel(ALERT_CHANNEL_ID)
             if self.alert_channel is None:
-                print(f"❌ [ERROR] Could not find channel with ID {ALERT_CHANNEL_ID}")
+                print(f"❌ [ERROR] Could not find channel with ID {ALERT_CHANNEL_ID}", flush=True)
         else:
-            print("⚠️ [WARN] No ALERT_CHANNEL_ID provided in env.")
+            print("⚠️ [WARN] No ALERT_CHANNEL_ID provided in env.", flush=True)
             
         if not self.monitor_stocks.is_running():
             self.monitor_stocks.start()
@@ -619,7 +619,7 @@ class StockBotClient(discord.Client):
         is_open = TIME_MARKET_OPEN <= curr_time <= TIME_MARKET_CLOSE
         if not (is_pre or is_open): return
         
-        print(f"[{now_et.strftime('%H:%M')}] Scanning started...")
+        print(f"[{now_et.strftime('%H:%M')}] Scanning started...", flush=True)
         users_data = settings.get("users", {})
         all_tickers = set()
         ticker_user_map = defaultdict(list)
@@ -747,7 +747,7 @@ class StockBotClient(discord.Client):
                         await self.alert_channel.send(content=msg, file=file)
                         sent_charts += 1
                         await asyncio.sleep(1.5) # 防止 API Rate Limit
-                    except Exception as e: print(f"❌ Send Error: {e}")
+                    except Exception as e: print(f"❌ Send Error: {e}", flush=True)
                     finally:
                         chart_buf.close() 
                 else:
@@ -761,7 +761,7 @@ class StockBotClient(discord.Client):
             
             save_settings()
         
-        print(f"[{now_et.strftime('%H:%M')}] Scan finished. Alerts: {len(alerts_buffer)}")
+        print(f"[{now_et.strftime('%H:%M')}] Scan finished. Alerts: {len(alerts_buffer)}", flush=True)
 
 intents = discord.Intents.default()
 client = StockBotClient(intents=intents)
@@ -876,13 +876,14 @@ async def test_command(interaction: discord.Interaction, ticker: str):
     await interaction.response.defer()
     ticker = ticker.upper().strip()
     
+    # 强制打印（立即输出）
+    print(f"🔍 [TEST 指令收到] 正在测试: {ticker}", flush=True)
+
     # 获取历史 + 实时 (复用并发函数)
     data_map = await fetch_historical_batch([ticker])
     quotes_map = await fetch_realtime_quotes([ticker])
     
     if not data_map or ticker not in data_map:
-        # 调试信息已经由 fetch_historical_batch 打印了
-        # 这里只返回一个通用失败提示
         await interaction.followup.send(f"❌ 失败 `{ticker}` (请查看后台详细日志，可能被403/429拦截)")
         return
         
@@ -905,6 +906,7 @@ async def test_command(interaction: discord.Interaction, ticker: str):
         f = discord.File(chart_buf, filename=f"{ticker}_test.png")
         await interaction.followup.send(content=msg, file=f)
     except Exception as e:
+        print(f"❌ Send Error: {e}", flush=True)
         await interaction.followup.send(f"⚠️ 发送图片失败: {e}")
     finally:
         chart_buf.close()
