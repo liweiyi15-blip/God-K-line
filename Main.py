@@ -15,6 +15,12 @@ import aiohttp
 import io
 import matplotlib
 
+# [新增] 引入 logging 模块
+import logging
+# 配置日志输出格式，方便在 Railway 上查看
+logging.basicConfig(level=logging.INFO, format='%(asctime)s | %(levelname)s | %(message)s')
+
+
 # --- 强制使用非交互式后端，防止Docker/Railway崩溃 ---
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -30,7 +36,7 @@ try:
     ALERT_CHANNEL_ID = int(os.getenv("ALERT_CHANNEL_ID"))
 except (TypeError, ValueError):
     ALERT_CHANNEL_ID = 0
-    print("⚠️ [WARN] ALERT_CHANNEL_ID not set or invalid.", flush=True)
+    logging.warning("ALERT_CHANNEL_ID not set or invalid.")
 
 # --- 全局配置 ---
 MARKET_TIMEZONE = pytz.timezone('America/New_York')
@@ -49,14 +55,14 @@ TIME_MARKET_CLOSE = time(16, 0)
 CONFIG = {
     "filter": {
         "max_60d_gain": 3.0,      
-        "max_rsi": 82,              # 稍微收紧 RSI，避免高位接盘
-        "max_bias_50": 0.45,        # [新增] 50日乖离率上限 (防止偏离均线过远)
-        "max_upper_shadow": 0.4,    # [新增] 允许的最大上影线比例 (超过0.4视为诱多)
-        "min_adx_trend": 20,        # [新增] 趋势确认的 ADX 门槛
+        "max_rsi": 82,              
+        "max_bias_50": 0.45,        
+        "max_upper_shadow": 0.4,    
+        "min_adx_trend": 20,        
         "max_day_change": 0.15,   
         "min_vol_ratio": 1.3,     
         "intraday_vol_ratio_normal": 1.8, 
-        "intraday_vol_ratio_open": 3.5, # [优化] 开盘30分钟要求更高倍数
+        "intraday_vol_ratio_open": 3.5, 
         "min_converge_angle": 0.05
     },
     "pattern": {
@@ -97,7 +103,7 @@ def load_settings():
             settings = {"users": {}, "signal_history": {}}
             save_settings()
     except Exception as e:
-        print(f"Error loading settings: {e}", flush=True)
+        logging.error(f"Error loading settings: {e}")
         settings = {"users": {}, "signal_history": {}}
 
 def save_settings():
@@ -108,7 +114,7 @@ def save_settings():
         with open(SETTINGS_FILE, 'w', encoding='utf-8') as f:
             json.dump(settings, f, indent=4)
     except Exception as e:
-        print(f"Error saving settings: {e}", flush=True)
+        logging.error(f"Error saving settings: {e}")
 
 def get_user_data(user_id):
     uid_str = str(user_id)
@@ -117,7 +123,7 @@ def get_user_data(user_id):
         settings["users"][uid_str] = {"stocks": [], "daily_status": {}}
     return settings["users"][uid_str]
 
-# --- 核心逻辑 (指标计算 - 增强版) ---
+# --- 核心逻辑 (指标计算) ---
 def calculate_nx_indicators(df):
     """计算核心指标 (包含 ADX, Bias, K线形态)"""
     cols = ['open', 'high', 'low', 'close', 'volume']
@@ -140,12 +146,11 @@ def calculate_nx_indicators(df):
     df['DEA'] = df['DIF'].ewm(span=9, adjust=False).mean()
     df['MACD'] = (df['DIF'] - df['DEA']) * 2
     
-    # 3. RSI (优化: 使用 clip 替代 where 防止 FutureWarning)
+    # 3. RSI 
     delta = df[price_col].diff()
     gain = (delta.clip(lower=0)).rolling(window=14).mean()
     loss = (-delta.clip(upper=0)).rolling(window=14).mean()
     
-    # 处理 loss 为 0 的情况，防止除以零
     rs = gain / loss.replace(0, 1e-9)
     df['RSI'] = 100 - (100 / (1 + rs))
     
@@ -175,19 +180,17 @@ def calculate_nx_indicators(df):
     df['D'] = df['K'].ewm(com=2).mean()
     df['J'] = 3 * df['K'] - 2 * df['D']
 
-    # --- 8. [新增] ADX / DMI 系统 ---
+    # 8. ADX / DMI 系统
     alpha = 1/14
     df['up_move'] = df['high'] - df['high'].shift(1)
     df['down_move'] = df['low'].shift(1) - df['low']
     df['pdm'] = np.where((df['up_move'] > df['down_move']) & (df['up_move'] > 0), df['up_move'], 0)
     df['mdm'] = np.where((df['down_move'] > df['up_move']) & (df['down_move'] > 0), df['down_move'], 0)
     
-    # 平滑处理
     df['TR_s'] = df['TR'].ewm(alpha=alpha, adjust=False).mean()
     df['PDM_s'] = df['pdm'].ewm(alpha=alpha, adjust=False).mean()
     df['MDM_s'] = df['mdm'].ewm(alpha=alpha, adjust=False).mean()
     
-    # 防止除零
     tr_s_safe = df['TR_s'].replace(0, 1e-9)
     df['PDI'] = 100 * (df['PDM_s'] / tr_s_safe)
     df['MDI'] = 100 * (df['MDM_s'] / tr_s_safe)
@@ -196,16 +199,13 @@ def calculate_nx_indicators(df):
     df['DX'] = 100 * abs(df['PDI'] - df['MDI']) / dx_denom
     df['ADX'] = df['DX'].ewm(alpha=alpha, adjust=False).mean()
 
-    # --- 9. [新增] 乖离率 (Bias) ---
+    # 9. 乖离率 (Bias)
     df['MA50'] = df['close'].rolling(50).mean()
-    # 防止 MA50 为 NaN 或 0
     ma50_safe = df['MA50'].replace(0, np.nan) 
     df['BIAS_50'] = (df['close'] - ma50_safe) / ma50_safe
 
-    # --- 10. [新增] K线形态特征 ---
+    # 10. K线形态特征
     candle_range = (df['high'] - df['low']).replace(0, 1e-9)
-    
-    # 上影线长度 (Upper Shadow)
     upper_shadow = np.where(df['close'] >= df['open'], df['high'] - df['close'], df['high'] - df['open'])
     df['Upper_Shadow_Ratio'] = upper_shadow / candle_range
 
@@ -259,7 +259,7 @@ def merge_and_recalc_sync(df, quote):
         return calculate_nx_indicators(df_mod)
         
     except Exception as e:
-        print(f"❌ [Merge Error] {e}", flush=True)
+        logging.error(f"[Merge Error] {e}")
         return df
 
 async def fetch_historical_batch(symbols: list, days=None):
@@ -299,11 +299,11 @@ async def fetch_historical_batch(symbols: list, days=None):
                         if df is not None and not df.empty:
                             results[sym] = df
                         else:
-                            print(f"⚠️ [数据为空] {sym}", flush=True)
+                            logging.warning(f"[数据为空] {sym}")
                     else:
-                        print(f"❌ [HTTP 错误] {sym} Status: {response.status}", flush=True)
+                        logging.error(f"[HTTP 错误] {sym} Status: {response.status}")
             except Exception as e:
-                print(f"❌ [异常] {sym}: {e}", flush=True)
+                logging.error(f"[异常] {sym}: {e}")
 
     async with aiohttp.ClientSession(headers=headers, connector=connector) as session:
         tasks_list = [fetch_single(session, sym) for sym in symbols]
@@ -332,7 +332,7 @@ async def fetch_realtime_quotes(symbols: list):
                              s = data.get('symbol')
                              if s: quotes_map[s] = data
             except Exception as e:
-                print(f"❌ [Quote Exception] {sym}: {e}", flush=True)
+                logging.error(f"[Quote Exception] {sym}: {e}")
 
     async with aiohttp.ClientSession(headers=headers, connector=connector) as session:
         tasks_list = [fetch_single_quote(session, sym) for sym in symbols]
@@ -387,6 +387,30 @@ def identify_patterns(df):
                         return "🚩 **放量旗形突破(机构算法)**", [[(t1,p1), (t2,p2)]], [[(t3,p3), (t4,p4)]]
     return None, [], []
 
+def get_volume_projection_factor(ny_now, minutes_elapsed):
+    """[新增] 采用分段/动态成交量推算公式"""
+    
+    # 市场开放总分钟数
+    TOTAL_MINUTES = 390
+    
+    # 极早期开盘阶段 (前10分钟)
+    if minutes_elapsed <= 10:
+        # 10分钟内，推算因子固定为 13 倍 (即开盘阶段的平均相对量)
+        return 13.0
+    
+    # 早盘阶段 (10 - 60 分钟)
+    elif minutes_elapsed <= 60:
+        # 从 13 倍开始线性递减到 8.0 倍
+        factor = 13.0 - (13.0 - 8.0) * (minutes_elapsed - 10) / 50
+        return factor
+    
+    # 盘中阶段 (60 - 390 分钟)
+    else:
+        # 从 8.0 倍开始线性递减到 4.0 倍
+        factor = 8.0 - (8.0 - 4.0) * (minutes_elapsed - 60) / (TOTAL_MINUTES - 60)
+        return factor
+
+
 def check_signals_sync(df):
     if len(df) < 60: return False, "", "NONE", [], []
     curr = df.iloc[-1]
@@ -416,16 +440,11 @@ def check_signals_sync(df):
     is_open_market = 0 < minutes_elapsed < 390
     
     if is_open_market:
-        safe_minutes = max(minutes_elapsed, 20) 
-        projection_factor = min(390 / safe_minutes, 20.0) 
+        safe_minutes = max(minutes_elapsed, 1) # 至少1分钟
+        # [优化] 使用分段推算因子
+        projection_factor = get_volume_projection_factor(ny_now, safe_minutes)
+        vol_threshold = CONFIG["filter"]["intraday_vol_ratio_normal"] 
         
-        # [优化] 动态量能门槛 (开盘半小时要求极高)
-        current_minutes_from_open = (ny_now.hour * 60 + ny_now.minute) - (9 * 60 + 30)
-        if 0 < current_minutes_from_open < 30:
-            vol_threshold = CONFIG["filter"]["intraday_vol_ratio_open"] # 3.5
-        else:
-            vol_threshold = CONFIG["filter"]["intraday_vol_ratio_normal"] # 1.8
-            
         proj_vol = curr['volume'] * projection_factor
     else:
         proj_vol = curr['volume']
@@ -436,9 +455,8 @@ def check_signals_sync(df):
     # --- 策略部分 ---
 
     # 策略 1: BB Squeeze (增强版: 需要 ADX 确认)
-    if curr['BB_Width'] < 0.08: # 稍微放宽宽度，依赖 ADX 过滤
+    if curr['BB_Width'] < 0.08:
         if curr['close'] > curr['BB_Up'] and is_heavy_volume:
-            # [新增] 只有在多头动能强(PDI>MDI) 且 趋势有力度(ADX>15) 时才突破
             if curr['ADX'] > 15 and curr['PDI'] > curr['MDI']:
                 triggers.append(f"🚀 **BB Squeeze (Trend Confirm)**: 紧缩突破 + 趋势增强")
                 if level == "NORMAL": level = "S_TIER"
@@ -448,7 +466,6 @@ def check_signals_sync(df):
     had_breakout = (recent_10['close'] > recent_10['Nx_Blue_UP']).any()
     on_support = curr['close'] > curr['Nx_Blue_DW'] and curr['low'] <= curr['Nx_Blue_UP'] * 1.02
     
-    # [新增] 必须是强趋势 (ADX > 20)
     is_strong_trend = curr['ADX'] > CONFIG["filter"]["min_adx_trend"] and curr['PDI'] > curr['MDI']
 
     if had_breakout and on_support and is_heavy_volume and is_strong_trend:
@@ -462,7 +479,6 @@ def check_signals_sync(df):
 
     is_downtrend = curr['close'] < curr['Nx_Blue_DW'] 
     if prev['close'] < prev['Nx_Blue_UP'] and curr['close'] > curr['Nx_Blue_UP']:
-        # 即使是趋势反转，也要求至少有点动能
         if curr['PDI'] > curr['MDI']:
             triggers.append(f"📈 **Nx 蓝梯突破**: 趋势转多确认")
             if level not in ["GOD_TIER", "S_TIER"]: level = "A_TIER"
@@ -526,13 +542,15 @@ def _generate_chart_sync(df, ticker, res_line=[], sup_line=[]):
         mpf.make_addplot(plot_df['DEA'], panel=2, color='blue'),
     ]
     
-    kwargs = dict(type='candle', style=my_style, title=f"{ticker} Analysis", ylabel='Price', addplot=add_plots, volume=True, panel_ratios=(6, 2, 2), savefig=buf)
+    # [优化 1] 增加 tight_layout=True 来消除边框空白
+    kwargs = dict(type='candle', style=my_style, title=f"{ticker} Analysis", ylabel='Price', addplot=add_plots, volume=True, panel_ratios=(6, 2, 2), tight_layout=True, savefig=buf)
     
     if res_line: 
         all_lines = []
         if res_line: all_lines.extend(res_line)
         if sup_line: all_lines.extend(sup_line)
-        kwargs['alines'] = dict(alines=all_lines, colors='white', linewidths=1.5, linestyle='--')
+        # [优化 2] 改变线颜色和宽度，使其更清晰
+        kwargs['alines'] = dict(alines=all_lines, colors='darkgray', linewidths=2.0, linestyle='-')
     
     try:
         mpf.plot(plot_df, **kwargs)
@@ -597,13 +615,13 @@ class StockBotClient(discord.Client):
 
     async def on_ready(self):
         load_settings()
-        print(f'Logged in as {self.user}', flush=True)
+        logging.info(f'Logged in as {self.user}')
         if ALERT_CHANNEL_ID != 0:
             self.alert_channel = self.get_channel(ALERT_CHANNEL_ID)
             if self.alert_channel is None:
-                print(f"❌ [ERROR] Could not find channel with ID {ALERT_CHANNEL_ID}", flush=True)
+                logging.error(f"Could not find channel with ID {ALERT_CHANNEL_ID}")
         else:
-            print("⚠️ [WARN] No ALERT_CHANNEL_ID provided in env.", flush=True)
+            logging.warning("No ALERT_CHANNEL_ID provided in env.")
             
         if not self.monitor_stocks.is_running():
             self.monitor_stocks.start()
@@ -619,7 +637,7 @@ class StockBotClient(discord.Client):
         is_open = TIME_MARKET_OPEN <= curr_time <= TIME_MARKET_CLOSE
         if not (is_pre or is_open): return
         
-        print(f"[{now_et.strftime('%H:%M')}] Scanning started...", flush=True)
+        logging.info(f"[{now_et.strftime('%H:%M')}] Scanning started...")
         users_data = settings.get("users", {})
         all_tickers = set()
         ticker_user_map = defaultdict(list)
@@ -631,7 +649,9 @@ class StockBotClient(discord.Client):
                 all_tickers.add(ticker)
                 ticker_user_map[ticker].append(uid)
 
-        if not all_tickers: return
+        if not all_tickers: 
+            logging.info("No tickers to scan.")
+            return
 
         # 1. 获取历史数据
         hist_map = await fetch_historical_batch(list(all_tickers))
@@ -669,18 +689,20 @@ class StockBotClient(discord.Client):
             
             last_signal_level = None
             
-            for i in range(0, cooldown_days + 1): 
-                past_date = (datetime.now() - timedelta(days=i)).strftime("%Y-%m-%d")
+            # [修复] 冷却逻辑: i 从 1 开始，排除今天
+            for i in range(1, cooldown_days + 1): 
+                past_date = (now_et.date() - timedelta(days=i)).strftime("%Y-%m-%d")
                 if past_date in history and ticker in history[past_date]:
                     last_signal_level = history[past_date][ticker]["level"]
                     in_cooldown = True 
-                    
+            
             is_triggered, reason, level, res_line, sup_line = await check_signals(df)
             
             if in_cooldown and last_signal_level:
                 current_prio = CONFIG["priority"].get(level, 0)
                 last_prio = CONFIG["priority"].get(last_signal_level, 0)
                 if current_prio <= last_prio:
+                    logging.info(f"Ticker {ticker} skipped due to cooldown ({last_signal_level}).")
                     continue 
 
             if is_triggered:
@@ -746,7 +768,7 @@ class StockBotClient(discord.Client):
                         await self.alert_channel.send(content=msg, file=file)
                         sent_charts += 1
                         await asyncio.sleep(1.5)
-                    except Exception as e: print(f"❌ Send Error: {e}", flush=True)
+                    except Exception as e: logging.error(f"Send Error: {e}")
                     finally:
                         chart_buf.close() 
                 else:
@@ -760,7 +782,7 @@ class StockBotClient(discord.Client):
             
             save_settings()
         
-        print(f"[{now_et.strftime('%H:%M')}] Scan finished. Alerts: {len(alerts_buffer)}", flush=True)
+        logging.info(f"[{now_et.strftime('%H:%M')}] Scan finished. Alerts: {len(alerts_buffer)}")
 
 intents = discord.Intents.default()
 client = StockBotClient(intents=intents)
@@ -875,7 +897,7 @@ async def test_command(interaction: discord.Interaction, ticker: str):
     await interaction.response.defer()
     ticker = ticker.upper().strip()
     
-    print(f"🔍 [TEST 指令收到] 正在测试: {ticker}", flush=True)
+    logging.info(f"[TEST 指令收到] 正在测试: {ticker}")
 
     data_map = await fetch_historical_batch([ticker])
     quotes_map = await fetch_realtime_quotes([ticker])
@@ -902,7 +924,7 @@ async def test_command(interaction: discord.Interaction, ticker: str):
         f = discord.File(chart_buf, filename=f"{ticker}_test.png")
         await interaction.followup.send(content=msg, file=f)
     except Exception as e:
-        print(f"❌ Send Error: {e}", flush=True)
+        logging.error(f"Send Error: {e}")
         await interaction.followup.send(f"⚠️ 发送图片失败: {e}")
     finally:
         chart_buf.close()
