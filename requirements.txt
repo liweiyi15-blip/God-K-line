@@ -1,7 +1,9 @@
 discord.py
-requests
 pandas
 numpy
+scipy
 mplfinance
-pytz
+requests
 python-dotenv
+pytz
+aiohttp
