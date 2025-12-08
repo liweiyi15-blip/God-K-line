@@ -7,13 +7,17 @@ from datetime import datetime, time, timedelta
 import asyncio
 import pandas as pd
 import numpy as np
-import mplfinance as mpf
 import pytz
 from dotenv import load_dotenv
 from collections import defaultdict
 from scipy.stats import linregress
 import aiohttp
 import io
+import matplotlib
+
+# --- [Fix Image 2] 强制使用非交互式后端，防止Docker崩溃 ---
+matplotlib.use('Agg')
+import mplfinance as mpf
 
 # --- 加载环境变量 ---
 load_dotenv()
@@ -43,7 +47,8 @@ CONFIG = {
         "max_rsi": 85,            
         "max_day_change": 0.15,   
         "min_vol_ratio": 1.3,     
-        "intraday_vol_ratio": 1.8, 
+        "intraday_vol_ratio_normal": 1.8, # 正常时段阈值
+        "intraday_vol_ratio_open": 2.8,   # [Fix Image 1] 开盘30分钟阈值
         "min_converge_angle": 0.05
     },
     "pattern": {
@@ -51,7 +56,7 @@ CONFIG = {
         "window": 60
     },
     "system": {
-        "cooldown_days": 5,
+        "cooldown_days": 3,          # [Fix Image 1] 缩短为72小时
         "max_charts_per_scan": 5,
         "history_days": 400
     },
@@ -106,7 +111,6 @@ def get_user_data(user_id):
 # --- 核心逻辑 (指标计算) ---
 def calculate_nx_indicators(df):
     """计算核心指标，必须在每次更新数据后调用"""
-    # 0. 数据清洗
     cols = ['open', 'high', 'low', 'close', 'volume']
     for c in cols:
         df[c] = pd.to_numeric(df[c], errors='coerce')
@@ -144,19 +148,18 @@ def calculate_nx_indicators(df):
     df['TR'] = df[['tr1', 'tr2', 'tr3']].max(axis=1)
     df['ATR'] = df['TR'].rolling(window=14).mean()
 
-    # 6. [新增] 布林带 (Bollinger Bands)
+    # 6. 布林带 (Bollinger Bands)
     df['BB_Mid'] = df['close'].rolling(20).mean()
     df['BB_Std'] = df['close'].rolling(20).std()
     df['BB_Up'] = df['BB_Mid'] + 2 * df['BB_Std']
     df['BB_Low'] = df['BB_Mid'] - 2 * df['BB_Std']
-    # 宽度指标：越小代表波动越极致
     df['BB_Width'] = (df['BB_Up'] - df['BB_Low']) / df['BB_Mid']
 
-    # 7. [新增] KDJ (9,3,3)
+    # 7. KDJ (9,3,3)
     low_min = df['low'].rolling(9).min()
     high_max = df['high'].rolling(9).max()
     df['RSV'] = (df['close'] - low_min) / (high_max - low_min) * 100
-    df['K'] = df['RSV'].ewm(com=2).mean() # alpha=1/3
+    df['K'] = df['RSV'].ewm(com=2).mean() 
     df['D'] = df['K'].ewm(com=2).mean()
     df['J'] = 3 * df['K'] - 2 * df['D']
     
@@ -174,6 +177,7 @@ def process_dataframe_sync(hist_data):
 def merge_and_recalc_sync(df, quote):
     """
     将实时Quote缝合到历史DataFrame中，并重新计算指标
+    [Updated] 同时将 Market Cap 注入到 DataFrame 属性中
     """
     if df is None or quote is None: return df
     
@@ -184,7 +188,6 @@ def merge_and_recalc_sync(df, quote):
         last_idx = df.index[-1]
         last_date = last_idx.normalize() if hasattr(last_idx, 'normalize') else pd.to_datetime(last_idx).normalize()
 
-        # [修正] 强制校准 DayHigh/DayLow，防止API数据滞后导致 High < Price
         current_price = quote['price']
         safe_high = max(quote['dayHigh'], current_price, quote['open'])
         safe_low = min(quote['dayLow'], current_price, quote['open'])
@@ -201,15 +204,17 @@ def merge_and_recalc_sync(df, quote):
         df_mod = df.copy()
         
         if last_date == quote_date:
-            # 更新今日数据
             for col in ['open', 'high', 'low', 'close', 'volume']:
                 df_mod.at[last_idx, col] = new_row[col]
         elif last_date < quote_date:
-            # 开启新的一天
             new_df = pd.DataFrame([new_row])
             new_df = new_df.set_index('date')
             df_mod = pd.concat([df_mod, new_df])
         
+        # [Fix Image 1] 注入市值数据供策略使用
+        if 'marketCap' in quote:
+            df_mod.attrs['marketCap'] = quote['marketCap']
+            
         return calculate_nx_indicators(df_mod)
         
     except Exception as e:
@@ -230,25 +235,42 @@ async def fetch_historical_batch(symbols: list, days=None):
         for i in range(0, len(symbols), chunk_size):
             chunk = symbols[i:i + chunk_size]
             symbols_str = ",".join(chunk)
-            # 使用 stable 接口
             url = f"https://financialmodelingprep.com/stable/historical-price-eod/full?symbol={symbols_str}&from={from_date}&to={to_date}&apikey={FMP_API_KEY}"
+            
+            # [DEBUG] 打印请求
+            print(f"🔎 [DEBUG] HistReq: {symbols_str}")
+            
             try:
                 async with session.get(url) as response:
+                    # [DEBUG] 打印状态码
+                    print(f"📡 [DEBUG] HistRes Status: {response.status}")
+                    
                     if response.status == 200:
                         data = await response.json()
                         items = []
                         if isinstance(data, dict):
                             if "historicalStockList" in data: items = data["historicalStockList"]
                             elif "symbol" in data and "historical" in data: items = [data]
+                            elif "Error Message" in data: # FMP 有时候返回 200 但内容是 Error
+                                print(f"❌ [ERROR] HistRes Content Error: {data}")
                         elif isinstance(data, list): items = data
                         
+                        if not items:
+                            print(f"⚠️ [WARN] HistRes Empty Items. Data: {str(data)[:200]}")
+
                         for item in items:
                             sym = item.get('symbol')
                             hist = item.get('historical', [])
                             if not hist or not sym: continue
                             df = await asyncio.to_thread(process_dataframe_sync, hist)
                             if df is not None: results[sym] = df
-            except Exception: pass
+                    else:
+                        # [DEBUG] 打印错误详情
+                        error_text = await response.text()
+                        print(f"❌ [ERROR] HistRes Failed: {error_text}")
+            except Exception as e:
+                 # [DEBUG] 打印异常堆栈
+                 print(f"❌ [EXCEPTION] HistReq: {e}")
     return results
 
 async def fetch_realtime_quotes(symbols: list):
@@ -261,16 +283,28 @@ async def fetch_realtime_quotes(symbols: list):
             chunk = symbols[i:i + chunk_size]
             symbols_str = ",".join(chunk)
             url = f"https://financialmodelingprep.com/stable/quote?symbol={symbols_str}&apikey={FMP_API_KEY}"
+            
+            # [DEBUG]
+            print(f"🔎 [DEBUG] QuoteReq: {symbols_str}")
+
             try:
                 async with session.get(url) as response:
+                    # [DEBUG]
+                    print(f"📡 [DEBUG] QuoteRes Status: {response.status}")
+
                     if response.status == 200:
                         data = await response.json()
                         if isinstance(data, list):
                             for item in data:
                                 sym = item.get('symbol')
                                 if sym: quotes_map[sym] = item
+                        else:
+                             print(f"⚠️ [WARN] QuoteRes Not List: {str(data)[:200]}")
+                    else:
+                        error_text = await response.text()
+                        print(f"❌ [ERROR] QuoteRes Failed: {error_text}")
             except Exception as e:
-                print(f"Quote Fetch Error: {e}")
+                print(f"❌ [EXCEPTION] QuoteReq: {e}")
     return quotes_map
 
 def linreg_trend(points, min_r2):
@@ -334,7 +368,7 @@ def check_signals_sync(df):
     if abs((curr['close'] - prev['close']) / prev['close']) > CONFIG["filter"]["max_day_change"]: return False, "", "RISK_FILTER", [], []
     if curr['RSI'] > CONFIG["filter"]["max_rsi"]: return False, "", "RISK_FILTER", [], []
 
-    # --- 量能预估 (U型权重优化) ---
+    # --- 量能预估 (Fix Image 1: 早盘特殊阈值) ---
     ny_now = datetime.now(MARKET_TIMEZONE)
     market_open = ny_now.replace(hour=9, minute=30, second=0, microsecond=0)
     minutes_elapsed = (ny_now - market_open).total_seconds() / 60
@@ -345,27 +379,27 @@ def check_signals_sync(df):
         safe_minutes = max(minutes_elapsed, 20) 
         projection_factor = 390 / safe_minutes
         
-        # [优化] 时间权重：早盘和尾盘通常放量，中午缩量。
-        # 用线性推演容易在早盘高估全天成交量，在午盘低估。
+        # [Fix Image 1] 9:30-10:00 使用 2.8 的高阈值，其他时间使用 1.8
         hour = ny_now.hour
-        if 9 <= hour < 10: time_weight = 0.85 # 早盘打折
-        elif 10 <= hour < 15: time_weight = 1.15 # 午盘加权
-        elif hour >= 15: time_weight = 0.95 # 尾盘微调
-        else: time_weight = 1.0
+        minute = ny_now.minute
         
-        proj_vol = curr['volume'] * projection_factor * time_weight
-        vol_threshold = CONFIG["filter"]["intraday_vol_ratio"]
+        if hour == 9 and minute >= 30:
+            vol_threshold = CONFIG["filter"]["intraday_vol_ratio_open"] # 2.8
+        else:
+            vol_threshold = CONFIG["filter"]["intraday_vol_ratio_normal"] # 1.8
+            
+        proj_vol = curr['volume'] * projection_factor
     else:
         proj_vol = curr['volume']
         vol_threshold = CONFIG["filter"]["min_vol_ratio"]
         
     is_heavy_volume = proj_vol > curr['Vol_MA20'] * vol_threshold
 
-    # --- 策略 1: 布林带挤压突破 (Squeeze Breakout) ---
-    # 布林带宽度处于历史低位(最近60天最低的1.5倍以内) + 价格突破上轨 + 放量
-    if curr['BB_Width'] < df['BB_Width'].tail(60).min() * 1.5: 
+    # --- 策略 1: 布林带挤压突破 (Fix Image 1: 绝对值) ---
+    # 改为 BB_Width < 0.06 (绝对值过滤)，大幅减少震荡市的假突破
+    if curr['BB_Width'] < 0.06: 
         if curr['close'] > curr['BB_Up'] and is_heavy_volume:
-            triggers.append(f"🚀 **BB Squeeze**: 布林带极致收口后放量突破")
+            triggers.append(f"🚀 **BB Squeeze**: 布林带极致收口(<0.06)放量突破")
             if level == "NORMAL": level = "S_TIER"
 
     # --- 策略 2: Nx 蓝梯 & 二次起爆 ---
@@ -377,6 +411,7 @@ def check_signals_sync(df):
         triggers.append(f"👑 **Nx 二次起爆**: 蓝梯回踩确认 + 放量启动")
         level = "GOD_TIER"
 
+    # [Fix Image 1] 旗形突破: 强调放量
     pattern_name, res_line, sup_line = identify_patterns(df)
     if pattern_name and is_heavy_volume:
         triggers.append(pattern_name)
@@ -388,32 +423,31 @@ def check_signals_sync(df):
         if level not in ["GOD_TIER", "S_TIER"]: level = "A_TIER"
 
     # --- 策略 3: 优化版底背离 & KDJ ---
-    # 定义低点
     price_low_20 = df['close'].tail(20).min()
     price_is_low = curr['close'] <= price_low_20 * 1.02
     
-    # KDJ 金叉 (比RSI更灵敏)
     if prev['J'] < 0 and curr['J'] > 0 and curr['K'] > curr['D']:
         triggers.append(f"💎 **KDJ 绝地反击**: 极度超卖 J 值回升")
         if level == "NORMAL": level = "B_TIER"
     
-    # 结构底背离 (MACD)
-    # 价格新低(或接近新低)，但MACD没创新低
     macd_low_20 = df['MACD'].tail(20).min()
     if price_is_low and curr['MACD'] < 0:
-        if curr['MACD'] > macd_low_20 * 0.8: # MACD 明显垫高
-             if curr['DIF'] > df['DIF'].tail(20).min(): # DIF 也垫高
+        if curr['MACD'] > macd_low_20 * 0.8:
+             if curr['DIF'] > df['DIF'].tail(20).min():
                 triggers.append(f"🛡️ **Cd 结构底背离**: 价格新低动能衰竭")
                 if level not in ["GOD_TIER", "S_TIER", "A_TIER"]: level = "B_TIER"
 
-    # --- 策略 4: 抛售高潮 (Selling Climax) ---
-    # 跌破布林下轨 + 巨量 + 长下影线
+    # --- 策略 4: 抛售高潮 (Fix Image 1: 市值过滤) ---
     pinbar_ratio = (curr['close'] - curr['low']) / (curr['high'] - curr['low'] + 1e-9)
-    if curr['low'] < curr['BB_Low']: # 刺穿下轨
-        if proj_vol > curr['Vol_MA20'] * 2.5: # 2.5倍巨量
-            if pinbar_ratio > 0.5: # 收盘在K线上半部
-                triggers.append(f"🛡️ **抛售高潮**: 恐慌盘涌出后 V 反")
-                level = "A_TIER"
+    market_cap = df.attrs.get('marketCap', float('inf')) # 默认为大盘股(inf)以策安全
+    
+    # 仅允许 50 亿市值以下的小盘股触发 V 反，大盘股不做
+    if curr['low'] < curr['BB_Low']:
+        if proj_vol > curr['Vol_MA20'] * 2.5:
+            if pinbar_ratio > 0.5:
+                if market_cap < 5_000_000_000:
+                    triggers.append(f"🛡️ **抛售高潮 (小盘股)**: 恐慌盘涌出后 V 反")
+                    level = "A_TIER"
 
     if triggers:
         if is_downtrend and len(triggers) < 2 and level not in ["GOD_TIER", "S_TIER"]:
@@ -425,8 +459,9 @@ async def check_signals(df):
     return await asyncio.to_thread(check_signals_sync, df)
 
 def _generate_chart_sync(df, ticker, res_line=[], sup_line=[]):
-    filename = f"{ticker}_alert.png"
-    # 获取最后收盘价和 ATR 用于画止损线
+    # [Fix Image 2] 使用 BytesIO 内存流，完全不写入硬盘
+    buf = io.BytesIO()
+    
     last_close = df['close'].iloc[-1]
     last_atr = df['ATR'].iloc[-1] if 'ATR' in df.columns else last_close * 0.05
     stop_price = last_close - 2 * last_atr
@@ -435,7 +470,6 @@ def _generate_chart_sync(df, ticker, res_line=[], sup_line=[]):
     my_style = mpf.make_mpf_style(base_mpl_style="ggplot", marketcolors=s, gridstyle=":")
     plot_df = df.tail(80)
     
-    # 构造 Stop Loss 线数据 (全长直线)
     stop_line = [stop_price] * len(plot_df)
 
     add_plots = [
@@ -443,14 +477,13 @@ def _generate_chart_sync(df, ticker, res_line=[], sup_line=[]):
         mpf.make_addplot(plot_df['Nx_Blue_DW'], color='dodgerblue', width=1.0),
         mpf.make_addplot(plot_df['Nx_Yellow_UP'], color='gold', width=1.0),
         mpf.make_addplot(plot_df['Nx_Yellow_DW'], color='gold', width=1.0),
-        # 添加止损线 (红色虚线)
         mpf.make_addplot(stop_line, color='red', linestyle='--', width=1.2),
         mpf.make_addplot(plot_df['MACD'], panel=2, type='bar', color='dimgray', alpha=0.5, ylabel='MACD'),
         mpf.make_addplot(plot_df['DIF'], panel=2, color='orange'),
         mpf.make_addplot(plot_df['DEA'], panel=2, color='blue'),
     ]
     
-    kwargs = dict(type='candle', style=my_style, title=f"{ticker} Analysis", ylabel='Price', addplot=add_plots, volume=True, panel_ratios=(6, 2, 2), savefig=filename)
+    kwargs = dict(type='candle', style=my_style, title=f"{ticker} Analysis", ylabel='Price', addplot=add_plots, volume=True, panel_ratios=(6, 2, 2), savefig=buf)
     
     if res_line: 
         all_lines = []
@@ -459,7 +492,8 @@ def _generate_chart_sync(df, ticker, res_line=[], sup_line=[]):
         kwargs['alines'] = dict(alines=all_lines, colors='white', linewidths=1.5, linestyle='--')
         
     mpf.plot(plot_df, **kwargs)
-    return filename
+    buf.seek(0)
+    return buf
 
 async def generate_chart(df, ticker, res_line=[], sup_line=[]):
     return await asyncio.to_thread(_generate_chart_sync, df, ticker, res_line, sup_line)
@@ -574,20 +608,28 @@ class StockBotClient(discord.Client):
             
             if all_alerted: continue
 
+            # [Fix Image 1] 冷却逻辑优化: 72小时冷却，但允许更高级别触发
             history = settings.get("signal_history", {})
             in_cooldown = False
             cooldown_days = CONFIG["system"]["cooldown_days"]
-            for i in range(1, cooldown_days + 1):
+            
+            last_signal_level = None
+            
+            for i in range(0, cooldown_days + 1): # 检查今天和过去3天
                 past_date = (datetime.now() - timedelta(days=i)).strftime("%Y-%m-%d")
                 if past_date in history and ticker in history[past_date]:
-                    past_level = history[past_date][ticker]["level"]
-                    if past_level == "GOD_TIER": 
-                        in_cooldown = True
-                        break 
+                    last_signal_level = history[past_date][ticker]["level"]
+                    # 如果之前触发过，我们记录下来，下面比较优先级
+                    in_cooldown = True 
                     
             is_triggered, reason, level, res_line, sup_line = await check_signals(df)
             
-            if in_cooldown and level != "GOD_TIER": continue 
+            if in_cooldown and last_signal_level:
+                # 只有当 新信号优先级 > 旧信号优先级 时才放行
+                current_prio = CONFIG["priority"].get(level, 0)
+                last_prio = CONFIG["priority"].get(last_signal_level, 0)
+                if current_prio <= last_prio:
+                    continue # 被冷却屏蔽
 
             if is_triggered:
                 price = df['close'].iloc[-1]
@@ -640,7 +682,8 @@ class StockBotClient(discord.Client):
                 emoji = CONFIG["emoji"].get(level, "🚨")
                 
                 if sent_charts < max_charts:
-                    chart_file = await generate_chart(alert["df"], ticker, alert["res_line"], alert["sup_line"])
+                    # [Fix Image 2] 接收 BytesIO 对象并直接发送，不存文件
+                    chart_buf = await generate_chart(alert["df"], ticker, alert["res_line"], alert["sup_line"])
                     msg = (
                         f"{mentions}\n【{emoji} {level} 信号】\n"
                         f"🎯 **{ticker}** | 💰 `${alert['price']:.2f}`\n"
@@ -648,12 +691,12 @@ class StockBotClient(discord.Client):
                         f"🛑 动态止损(2ATR): `${alert['support']:.2f}`"
                     )
                     try:
-                        file = discord.File(chart_file)
+                        file = discord.File(chart_buf, filename=f"{ticker}.png")
                         await self.alert_channel.send(content=msg, file=file)
                         sent_charts += 1
                     except Exception as e: print(e)
                     finally:
-                        if os.path.exists(chart_file): os.remove(chart_file)
+                        chart_buf.close() # 释放内存
                 else:
                     summary_list.append(f"{emoji} **{ticker}** ({level})")
 
@@ -784,6 +827,8 @@ async def test_command(interaction: discord.Interaction, ticker: str):
     quotes_map = await fetch_realtime_quotes([ticker])
     
     if not data_map or ticker not in data_map:
+        # [DEBUG] 打印失败原因
+        print(f"⚠️ [TEST] Fail: data_map empty or key missing. Keys: {list(data_map.keys())} Target: {ticker}")
         await interaction.followup.send(f"❌ 失败 `{ticker}`")
         return
         
@@ -801,14 +846,15 @@ async def test_command(interaction: discord.Interaction, ticker: str):
     # 即使没触发信号，test命令也强制画图，方便观察
     if not reason: reason = "手动测试 (无信号)"
     
-    cf = await generate_chart(df, ticker, r_l, s_l)
+    chart_buf = await generate_chart(df, ticker, r_l, s_l)
     msg = f"✅ `{ticker}` | {level}\n💰 `${price:.2f}`\n📝 {reason}\n🛑 Stop: `${stop_loss:.2f}`"
     try:
-        f = discord.File(cf)
+        f = discord.File(chart_buf, filename=f"{ticker}_test.png")
         await interaction.followup.send(content=msg, file=f)
-    except: pass
+    except Exception as e:
+        await interaction.followup.send(f"⚠️ 发送图片失败: {e}")
     finally:
-        if os.path.exists(cf): os.remove(cf)
+        chart_buf.close()
 
 if __name__ == "__main__":
     if DISCORD_TOKEN: client.run(DISCORD_TOKEN)
