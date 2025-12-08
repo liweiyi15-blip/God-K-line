@@ -37,6 +37,20 @@ TIME_PRE_MARKET_START = time(9, 0)
 TIME_MARKET_OPEN = time(9, 30)
 TIME_MARKET_CLOSE = time(16, 0)
 
+# 纳斯达克 100 列表 (硬编码)
+NASDAQ_100_LIST = [
+    "AAPL", "MSFT", "AMZN", "NVDA", "META", "GOOGL", "GOOG", "TSLA", "AVGO", "ADBE",
+    "COST", "PEP", "CSCO", "NFLX", "AMD", "TMUS", "INTC", "CMCSA", "AZN", "QCOM",
+    "TXN", "AMGN", "HON", "INTU", "SBUX", "GILD", "BKNG", "DIOD", "MDLZ", "ISRG",
+    "REGN", "LRCX", "VRTX", "ADP", "ADI", "MELI", "KLAC", "PANW", "SNPS", "CDNS",
+    "CHTR", "MAR", "CSX", "ORLY", "MNST", "NXPI", "CTAS", "FTNT", "WDAY", "DXCM",
+    "PCAR", "KDP", "PAYX", "IDXX", "AEP", "LULU", "EXC", "BIIB", "ADSK", "XEL",
+    "ROST", "MCHP", "CPRT", "SGEN", "DLTR", "EA", "FAST", "CTSH", "WBA", "VRSK",
+    "CSGP", "ODFL", "ANSS", "EBAY", "ILMN", "GFS", "ALGN", "TEAM", "CDW", "WBD",
+    "SIRI", "ZM", "ENPH", "JD", "PDD", "LCID", "RIVN", "ZS", "DDOG", "CRWD", "TTD",
+    "BKR", "CEG", "GEHC", "ON", "FANG"
+]
+
 # --- 全局变量 ---
 settings = {}
 
@@ -123,7 +137,7 @@ def check_signals(df):
 def generate_chart(df, ticker):
     filename = f"{ticker}_alert.png"
     s = mpf.make_marketcolors(up='r', down='g', inherit=True)
-    # 使用 ggplot 样式以避免 seaborn 错误
+    # 使用 ggplot 样式，兼容性最好
     my_style = mpf.make_mpf_style(base_mpl_style="ggplot", marketcolors=s, gridstyle=":")
     
     plot_df = df.tail(60)
@@ -140,17 +154,17 @@ def generate_chart(df, ticker):
     mpf.plot(plot_df, type='candle', style=my_style, title=title, ylabel='Price ($)', addplot=add_plots, volume=True, panel_ratios=(6, 2, 2), savefig=filename)
     return filename
 
-# --- 数据获取 ---
+# --- 数据获取 (400天版本) ---
 
 def get_stock_data(ticker, days=200):
-    # 动态日期计算
     now = datetime.now()
     end_date_str = now.strftime("%Y-%m-%d")
+    # 按照要求，保持 400 天，确保指标精准
     start_date_str = (now - timedelta(days=400)).strftime("%Y-%m-%d")
     
     url = (
-        f"https://financialmodelingprep.com/stable/historical-price-eod/full"
-        f"?symbol={ticker}&from={start_date_str}&to={end_date_str}&apikey={FMP_API_KEY}"
+        f"https://financialmodelingprep.com/api/v3/historical-price-full/{ticker}"
+        f"?from={start_date_str}&to={end_date_str}&apikey={FMP_API_KEY}"
     )
     
     print(f"🔍 [Debug] Requesting {ticker} ({start_date_str} to {end_date_str})...")
@@ -159,31 +173,24 @@ def get_stock_data(ticker, days=200):
         response = requests.get(url, timeout=10)
         
         if response.status_code != 200:
-            print(f"❌ [API Error] HTTP {response.status_code}: {response.text}")
+            print(f"❌ [API Error] {ticker} HTTP {response.status_code}")
             return None
             
         data = response.json()
-        
-        if not data:
-            print(f"❌ [API Error] Empty response for {ticker}")
-            return None
+        if not data: return None
             
-        if isinstance(data, list):
-            df = pd.DataFrame(data)
-        elif isinstance(data, dict) and 'historical' in data:
+        if isinstance(data, dict) and 'historical' in data:
             df = pd.DataFrame(data['historical'])
+        elif isinstance(data, list) and len(data) > 0:
+            df = pd.DataFrame(data)
         else:
-            print(f"❌ [API Error] Unexpected data format: {type(data)}")
             return None
+
+        if df.empty: return None
 
         df = df.set_index('date').sort_index(ascending=True)
         df.index = pd.to_datetime(df.index)
         
-        print(f"✅ [Success] Loaded {len(df)} rows for {ticker}")
-        
-        if len(df) < 90:
-            print(f"⚠️ [Warning] Not enough data for {ticker} (only {len(df)} rows).")
-            
         return calculate_nx_indicators(df)
         
     except Exception as e:
@@ -272,19 +279,37 @@ class StockBotClient(discord.Client):
                         f"🌊 **Nx 蓝梯下沿**: `${nx_support:.2f}`"
                     )
                     try:
-                        # 修正点：直接发送，不用 with
                         file = discord.File(chart_file)
                         await self.alert_channel.send(content=msg, file=file)
                     except Exception as e:
                         print(f"Error sending alert: {e}")
                     finally:
                         if os.path.exists(chart_file): os.remove(chart_file)
-            time_module.sleep(1.5)
+            time_module.sleep(1.2)
 
 # --- 实例化 & 注册命令 ---
 
 intents = discord.Intents.default()
 client = StockBotClient(intents=intents)
+
+@client.tree.command(name="import_nasdaq", description="[快捷] 导入纳斯达克100 (本地列表)")
+async def import_nasdaq(interaction: discord.Interaction):
+    await interaction.response.defer()
+    user_data = get_user_data(interaction.user.id)
+    
+    # 直接使用本地列表
+    new_list = list(set(NASDAQ_100_LIST))
+    current_set = set(user_data["stocks"])
+    current_set.update(new_list)
+    user_data["stocks"] = list(current_set)
+    save_settings()
+    
+    await interaction.followup.send(
+        f"✅ **导入成功！**\n"
+        f"已添加 {len(new_list)} 只纳斯达克 100 成分股。\n"
+        f"当前监控总数: **{len(user_data['stocks'])}**\n"
+        f"数据来源: 最近 400 天 (保证 EMA90 精度)"
+    )
 
 @client.tree.command(name="addstocks", description="[个人] 添加关注股票")
 async def add_stocks(interaction: discord.Interaction, tickers: str):
@@ -300,7 +325,11 @@ async def add_stocks(interaction: discord.Interaction, tickers: str):
 @client.tree.command(name="liststocks", description="[个人] 查看我的股票")
 async def list_stocks(interaction: discord.Interaction):
     stocks = get_user_data(interaction.user.id)["stocks"]
-    await interaction.response.send_message(f"📋 **关注列表**:\n`{', '.join(stocks) if stocks else '空'}`", ephemeral=True)
+    if len(stocks) > 60:
+        display_str = ", ".join(stocks[:60]) + f"... (共 {len(stocks)} 只)"
+    else:
+        display_str = ", ".join(stocks) if stocks else '空'
+    await interaction.response.send_message(f"📋 **关注列表**:\n`{display_str}`", ephemeral=True)
 
 @client.tree.command(name="clearstocks", description="[个人] 清空我的股票")
 async def clear_stocks(interaction: discord.Interaction):
@@ -317,7 +346,7 @@ async def test_command(interaction: discord.Interaction, ticker: str):
     df = get_stock_data(ticker)
     
     if df is None:
-        await interaction.followup.send("❌ 获取失败，请检查 Railway 日志。")
+        await interaction.followup.send(f"❌ 获取 `{ticker}` 失败。请检查拼写或 API 额度。")
         return
         
     chart_file = generate_chart(df, ticker)
@@ -325,19 +354,16 @@ async def test_command(interaction: discord.Interaction, ticker: str):
     
     msg = (
         f"✅ **接口测试正常** | `{ticker}`\n"
-        f"数据来源: `historical-price-eod` (近400天)\n"
-        f"• 日期: `{df.index[-1].strftime('%Y-%m-%d')}`\n"
-        f"• 收盘: `{last_row['close']:.2f}`\n"
-        f"• Nx蓝梯上沿: `{last_row['Nx_Blue_UP']:.2f}`\n"
-        f"• RSI(14): `{last_row['RSI']:.2f}`"
+        f"📅 日期: `{df.index[-1].strftime('%Y-%m-%d')}` (数据量: {len(df)})\n"
+        f"💰 收盘: `${last_row['close']:.2f}`\n"
+        f"🌊 Nx蓝梯上沿: `${last_row['Nx_Blue_UP']:.2f}`\n"
+        f"📉 RSI(14): `{last_row['RSI']:.2f}`"
     )
     
     try:
-        # 修正点：直接发送，不用 with
         file = discord.File(chart_file)
         await interaction.followup.send(content=msg, file=file)
     except Exception as e:
-        print(f"Error sending: {e}")
         await interaction.followup.send(f"❌ 发送失败: {e}")
     finally:
         if os.path.exists(chart_file): os.remove(chart_file)
