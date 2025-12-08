@@ -123,9 +123,7 @@ def check_signals(df):
 def generate_chart(df, ticker):
     filename = f"{ticker}_alert.png"
     s = mpf.make_marketcolors(up='r', down='g', inherit=True)
-    
-    # 🔴 关键修复：将 "seaborn" 改为 "ggplot" (或者 "seaborn-v0_8")
-    # "ggplot" 是一个稳定且兼容性极好的样式，避免了新版 Matplotlib 找不到 seaborn 样式的问题
+    # 使用 ggplot 样式以避免 seaborn 错误
     my_style = mpf.make_mpf_style(base_mpl_style="ggplot", marketcolors=s, gridstyle=":")
     
     plot_df = df.tail(60)
@@ -145,6 +143,7 @@ def generate_chart(df, ticker):
 # --- 数据获取 ---
 
 def get_stock_data(ticker, days=200):
+    # 动态日期计算
     now = datetime.now()
     end_date_str = now.strftime("%Y-%m-%d")
     start_date_str = (now - timedelta(days=400)).strftime("%Y-%m-%d")
@@ -183,7 +182,7 @@ def get_stock_data(ticker, days=200):
         print(f"✅ [Success] Loaded {len(df)} rows for {ticker}")
         
         if len(df) < 90:
-            print(f"⚠️ [Warning] Not enough data for {ticker} (only {len(df)} rows). Indicators may be inaccurate.")
+            print(f"⚠️ [Warning] Not enough data for {ticker} (only {len(df)} rows).")
             
         return calculate_nx_indicators(df)
         
@@ -273,8 +272,11 @@ class StockBotClient(discord.Client):
                         f"🌊 **Nx 蓝梯下沿**: `${nx_support:.2f}`"
                     )
                     try:
-                        with discord.File(chart_file) as file:
-                            await self.alert_channel.send(content=msg, file=file)
+                        # 修正点：直接发送，不用 with
+                        file = discord.File(chart_file)
+                        await self.alert_channel.send(content=msg, file=file)
+                    except Exception as e:
+                        print(f"Error sending alert: {e}")
                     finally:
                         if os.path.exists(chart_file): os.remove(chart_file)
             time_module.sleep(1.5)
@@ -331,8 +333,12 @@ async def test_command(interaction: discord.Interaction, ticker: str):
     )
     
     try:
-        with discord.File(chart_file) as file:
-            await interaction.followup.send(content=msg, file=file)
+        # 修正点：直接发送，不用 with
+        file = discord.File(chart_file)
+        await interaction.followup.send(content=msg, file=file)
+    except Exception as e:
+        print(f"Error sending: {e}")
+        await interaction.followup.send(f"❌ 发送失败: {e}")
     finally:
         if os.path.exists(chart_file): os.remove(chart_file)
 
