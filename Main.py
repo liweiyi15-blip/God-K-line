@@ -41,10 +41,11 @@ TIME_MARKET_CLOSE = time(16, 0)
 # --- 核心策略配置 ---
 CONFIG = {
     "filter": {
-        "max_60d_gain": 1.4,
-        "max_3d_gain": 0.35,
-        "max_day_change": 0.12,
-        "min_vol_ratio": 1.3,
+        "max_60d_gain": 3.0,     # 放宽：允许60天涨幅达到200%（捕捉妖股）
+        "max_rsi": 85,           # 新增：RSI超过85视为极度超买，暂停推荐
+        "max_day_change": 0.15,  # 允许单日波动稍微大一点
+        "min_vol_ratio": 1.3,    # 收盘量比阈值
+        "intraday_vol_ratio": 1.8, # 新增：盘中推算量比阈值（要求更严）
         "min_converge_angle": 0.05
     },
     "pattern": {
@@ -112,6 +113,7 @@ async def fetch_historical_batch(symbols: list, days=400):
         for i in range(0, len(symbols), chunk_size):
             chunk = symbols[i:i + chunk_size]
             symbols_str = ",".join(chunk)
+            # 使用 stable 接口 (v3)
             url = f"https://financialmodelingprep.com/api/v3/historical-price-full/{symbols_str}?from={from_date}&to={to_date}&apikey={FMP_API_KEY}"
             try:
                 async with session.get(url) as response:
@@ -138,22 +140,37 @@ async def fetch_historical_batch(symbols: list, days=400):
     return results
 
 def calculate_nx_indicators(df):
+    # 均线系统
     df['Nx_Blue_UP'] = df['high'].ewm(span=24, adjust=False).mean()
     df['Nx_Blue_DW'] = df['low'].ewm(span=23, adjust=False).mean()
     df['Nx_Yellow_UP'] = df['high'].ewm(span=89, adjust=False).mean()
     df['Nx_Yellow_DW'] = df['low'].ewm(span=90, adjust=False).mean()
+    
+    # MACD
     price_col = 'close'
     exp12 = df[price_col].ewm(span=12, adjust=False).mean()
     exp26 = df[price_col].ewm(span=26, adjust=False).mean()
     df['DIF'] = exp12 - exp26
     df['DEA'] = df['DIF'].ewm(span=9, adjust=False).mean()
     df['MACD'] = (df['DIF'] - df['DEA']) * 2
+    
+    # RSI
     delta = df[price_col].diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
     rs = gain / loss
     df['RSI'] = 100 - (100 / (1 + rs))
+    
+    # 成交量均线
     df['Vol_MA20'] = df['volume'].rolling(window=20).mean()
+    
+    # ATR (Average True Range) - 用于止损计算
+    df['tr1'] = df['high'] - df['low']
+    df['tr2'] = abs(df['high'] - df['close'].shift(1))
+    df['tr3'] = abs(df['low'] - df['close'].shift(1))
+    df['TR'] = df[['tr1', 'tr2', 'tr3']].max(axis=1)
+    df['ATR'] = df['TR'].rolling(window=14).mean()
+    
     return df
 
 def linreg_trend(points, min_r2):
@@ -190,14 +207,14 @@ def identify_patterns(df):
                 curr_idx = recent.index[-1]
                 resistance_today = slope_res * curr_idx + int_res
                 curr_close = recent['close'].iloc[-1]
-                curr_vol = recent['volume'].iloc[-1]
-                vol_ma = recent['Vol_MA20'].iloc[-1]
+                
+                # 成交量判定将在 check_signals 统一处理
                 prev_idx = recent.index[-2]
                 res_prev = slope_res * prev_idx + int_res
                 prev_close = recent['close'].iloc[-2]
                 
                 if prev_close <= res_prev * 1.02:
-                    if curr_close > resistance_today and curr_vol > vol_ma * CONFIG["filter"]["min_vol_ratio"]:
+                    if curr_close > resistance_today:
                         t1, t2 = recent['date'].iloc[0], recent['date'].iloc[-1]
                         p1, p2 = slope_res * recent.index[0] + int_res, slope_res * recent.index[-1] + int_res
                         t3, t4 = t1, t2
@@ -211,39 +228,74 @@ def check_signals(df):
     prev = df.iloc[-2]
     triggers = []
     level = "NORMAL"
-    low_60 = df['low'].tail(60).min()
-    if curr['close'] > low_60 * CONFIG["filter"]["max_60d_gain"]: return False, "", "RISK_FILTER", [], []
-    if df['close'].pct_change(3).iloc[-1] > CONFIG["filter"]["max_3d_gain"]: return False, "", "RISK_FILTER", [], []
-    if abs((curr['close'] - prev['close']) / prev['close']) > CONFIG["filter"]["max_day_change"]: return False, "", "RISK_FILTER", [], []
 
+    # --- 0. 基础过滤 ---
+    low_60 = df['low'].tail(60).min()
+    # 移除过于严格的60日涨幅限制，改为动量判断：如果60天涨了3倍以上，暂时不推
+    if curr['close'] > low_60 * CONFIG["filter"]["max_60d_gain"]: return False, "", "RISK_FILTER", [], []
+    # 限制单日暴涨
+    if abs((curr['close'] - prev['close']) / prev['close']) > CONFIG["filter"]["max_day_change"]: return False, "", "RISK_FILTER", [], []
+    # RSI 极度超买过滤
+    if curr['RSI'] > CONFIG["filter"]["max_rsi"]: return False, "", "RISK_FILTER", [], []
+
+    # --- 1. 成交量推算 (关键优化) ---
+    ny_now = datetime.now(MARKET_TIMEZONE)
+    market_open = ny_now.replace(hour=9, minute=30, second=0, microsecond=0)
+    minutes_elapsed = (ny_now - market_open).total_seconds() / 60
+    
+    is_open_market = 0 < minutes_elapsed < 390
+    
+    if is_open_market:
+        # 盘中：简单推算，前30分钟给予一定缓冲，防止开盘脉冲
+        projection_factor = 390 / max(minutes_elapsed, 20) 
+        proj_vol = curr['volume'] * projection_factor
+        vol_threshold = CONFIG["filter"]["intraday_vol_ratio"] # 盘中要求更高 (1.8倍)
+    else:
+        # 盘后或盘前：直接用实际量
+        proj_vol = curr['volume']
+        vol_threshold = CONFIG["filter"]["min_vol_ratio"] # 收盘要求 (1.3倍)
+        
+    is_heavy_volume = proj_vol > curr['Vol_MA20'] * vol_threshold
+
+    # --- 2. 信号逻辑 ---
+    
+    # 逻辑 A: Nx 蓝梯回踩/突破 (趋势)
     recent_10 = df.tail(10)
     had_breakout = (recent_10['close'] > recent_10['Nx_Blue_UP']).any()
     on_support = curr['close'] > curr['Nx_Blue_DW'] and curr['low'] <= curr['Nx_Blue_UP'] * 1.02
-    re_volume = curr['volume'] > curr['Vol_MA20'] * 1.5
-    if had_breakout and on_support and re_volume:
+    
+    if had_breakout and on_support and is_heavy_volume:
         triggers.append(f"👑 **二次起爆**: 蓝梯回踩确认 + 放量启动")
         level = "GOD_TIER"
 
+    # 逻辑 B: 形态突破
     pattern_name, res_line, sup_line = identify_patterns(df)
     if pattern_name:
-        triggers.append(pattern_name)
-        if level != "GOD_TIER": level = "S_TIER"
+        # 形态突破也需要放量验证
+        if is_heavy_volume:
+            triggers.append(pattern_name)
+            if level != "GOD_TIER": level = "S_TIER"
 
+    # 逻辑 C: 趋势转多
     is_downtrend = curr['close'] < curr['Nx_Blue_DW'] 
     if prev['close'] < prev['Nx_Blue_UP'] and curr['close'] > curr['Nx_Blue_UP']:
         triggers.append(f"📈 **Nx 蓝梯突破**: 趋势转多确认")
         if level not in ["GOD_TIER", "S_TIER"]: level = "A_TIER"
 
+    # 逻辑 D: 结构底背离 (优化版)
     low_20 = df['low'].tail(20).min()
-    price_is_low = curr['low'] <= low_20 * 1.01
+    price_is_low = curr['low'] <= low_20 * 1.02
     dif_20_min = df['DIF'].tail(20).min()
-    divergence = curr['DIF'] > dif_20_min 
-    momentum_turn = curr['MACD'] > prev['MACD']
-    if price_is_low and divergence and momentum_turn:
-        if is_downtrend or curr['RSI'] < 35:
+    
+    # 严格背离：价格新低，DIF抬高，且MACD柱子正在变长(动能增强)
+    divergence = (curr['DIF'] > dif_20_min) and (curr['MACD'] > prev['MACD'])
+    
+    if price_is_low and divergence:
+        if is_downtrend or curr['RSI'] < 40: # 只在低位看背离
              triggers.append(f"💎 **Cd 结构底背离**: 底部反转信号")
              if level not in ["GOD_TIER", "S_TIER", "A_TIER"]: level = "B_TIER"
 
+    # 逻辑 E: RSI 金叉
     if prev['RSI'] < 30 and curr['RSI'] > 30:
         triggers.append(f"🚀 **RSI 弘历战法**: 超卖金叉")
         if level == "NORMAL": level = "C_TIER"
@@ -397,7 +449,9 @@ class StockBotClient(discord.Client):
 
             if is_triggered:
                 price = df['close'].iloc[-1]
-                nx_support = df['Nx_Blue_DW'].iloc[-1]
+                # 使用 ATR 辅助计算动态止损位：收盘价 - 2倍ATR
+                atr_val = df['ATR'].iloc[-1] if 'ATR' in df.columns else (price * 0.05)
+                stop_loss = price - (2 * atr_val)
                 
                 alert_obj = {
                     "ticker": ticker,
@@ -405,7 +459,7 @@ class StockBotClient(discord.Client):
                     "priority": CONFIG["priority"].get(level, 0),
                     "price": price,
                     "reason": reason,
-                    "support": nx_support,
+                    "support": stop_loss, # 显示为动态止损位
                     "df": df,
                     "res_line": res_line,
                     "sup_line": sup_line,
@@ -450,7 +504,7 @@ class StockBotClient(discord.Client):
                         f"{mentions}\n【{emoji} {level} 信号】\n"
                         f"🎯 **{ticker}** | 💰 `${alert['price']:.2f}`\n"
                         f"{'-'*20}\n{alert['reason']}\n{'-'*20}\n"
-                        f"🌊 支撑: `${alert['support']:.2f}`"
+                        f"🛑 动态止损(2ATR): `${alert['support']:.2f}`"
                     )
                     try:
                         file = discord.File(chart_file)
@@ -592,8 +646,14 @@ async def test_command(interaction: discord.Interaction, ticker: str):
         return
     df = data_map[ticker]
     trig, reason, level, r_l, s_l = check_signals(df)
+    
+    # 模拟止损计算
+    price = df['close'].iloc[-1]
+    atr_val = df['ATR'].iloc[-1] if 'ATR' in df.columns else (price * 0.05)
+    stop_loss = price - (2 * atr_val)
+
     cf = await generate_chart(df, ticker, r_l, s_l)
-    msg = f"✅ `{ticker}` | {level}\n💰 `${df['close'].iloc[-1]:.2f}`\n📝 {reason}"
+    msg = f"✅ `{ticker}` | {level}\n💰 `${price:.2f}`\n📝 {reason}\n🛑 Stop: `${stop_loss:.2f}`"
     try:
         f = discord.File(cf)
         await interaction.followup.send(content=msg, file=f)
