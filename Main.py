@@ -80,15 +80,15 @@ CONFIG = {
         "WEIGHTS": {
             "GOD_TIER_NX": 40,    
             "PATTERN_BREAK": 25, 
-            "BB_SQUEEZE": 15,      
-            "STRONG_ADX": 10,      
+            "BB_SQUEEZE": 15,       
+            "STRONG_ADX": 10,       
             "HEAVY_VOLUME": 10,  
-            "KDJ_REBOUND": 8,    
+            "KDJ_REBOUND": 8,     
             "MACD_ZERO_CROSS": 8, 
-            "NX_BREAKOUT": 7,    
-            "CANDLE_PATTERN": 5, # [新增] K线形态权重
-            "MACD_DIVERGE": 5,    
-            "CAPITULATION": 12    
+            "NX_BREAKOUT": 7,     
+            "CANDLE_PATTERN": 5,
+            "MACD_DIVERGE": 5,     
+            "CAPITULATION": 12     
         },
         "EMOJI": { 
             100: "TOP", 90: "HIGH", 80: "MID", 70: "LOW", 60: "TEST"
@@ -141,15 +141,15 @@ def calculate_nx_indicators(df):
     cols = ['open', 'high', 'low', 'close', 'volume']
     for c in cols:
         df[c] = pd.to_numeric(df[c], errors='coerce')
-    
+     
     df = df[df['close'] > 0]
-    
+     
     # 1. Nx 均线
     df['Nx_Blue_UP'] = df['high'].ewm(span=24, adjust=False).mean()
     df['Nx_Blue_DW'] = df['low'].ewm(span=23, adjust=False).mean()
     df['Nx_Yellow_UP'] = df['high'].ewm(span=89, adjust=False).mean()
     df['Nx_Yellow_DW'] = df['low'].ewm(span=90, adjust=False).mean()
-    
+     
     # 2. MACD
     price_col = 'close'
     exp12 = df[price_col].ewm(span=12, adjust=False).mean()
@@ -157,18 +157,18 @@ def calculate_nx_indicators(df):
     df['DIF'] = exp12 - exp26
     df['DEA'] = df['DIF'].ewm(span=9, adjust=False).mean()
     df['MACD'] = (df['DIF'] - df['DEA']) * 2
-    
+     
     # 3. RSI 
     delta = df[price_col].diff()
     gain = (delta.clip(lower=0)).rolling(window=14).mean()
     loss = (-delta.clip(upper=0)).rolling(window=14).mean()
-    
+     
     rs = gain / loss.replace(0, 1e-9)
     df['RSI'] = 100 - (100 / (1 + rs))
-    
+     
     # 4. Volume MA
     df['Vol_MA20'] = df['volume'].rolling(window=20).mean()
-    
+     
     # 5. ATR
     df['tr1'] = df['high'] - df['low']
     df['tr2'] = abs(df['high'] - df['close'].shift(1))
@@ -198,15 +198,15 @@ def calculate_nx_indicators(df):
     df['down_move'] = df['low'].shift(1) - df['low']
     df['pdm'] = np.where((df['up_move'] > df['down_move']) & (df['up_move'] > 0), df['up_move'], 0)
     df['mdm'] = np.where((df['down_move'] > df['up_move']) & (df['down_move'] > 0), df['down_move'], 0)
-    
+     
     df['TR_s'] = df['TR'].ewm(alpha=alpha, adjust=False).mean()
     df['PDM_s'] = df['pdm'].ewm(alpha=alpha, adjust=False).mean()
     df['MDM_s'] = df['mdm'].ewm(alpha=alpha, adjust=False).mean()
-    
+     
     tr_s_safe = df['TR_s'].replace(0, 1e-9)
     df['PDI'] = 100 * (df['PDM_s'] / tr_s_safe)
     df['MDI'] = 100 * (df['MDM_s'] / tr_s_safe)
-    
+     
     dx_denom = (df['PDI'] + df['MDI']).replace(0, 1e-9)
     df['DX'] = 100 * abs(df['PDI'] - df['MDI']) / dx_denom
     df['ADX'] = df['DX'].ewm(alpha=alpha, adjust=False).mean()
@@ -236,7 +236,7 @@ def merge_and_recalc_sync(df, quote):
     try:
         quote_time = pd.to_datetime(quote['timestamp'], unit='s').tz_localize('UTC').tz_convert(MARKET_TIMEZONE)
         quote_date = quote_time.normalize().tz_localize(None) 
-        
+         
         last_idx = df.index[-1]
         last_date = pd.to_datetime(last_idx).normalize()
         if last_date.tzinfo is not None:
@@ -254,9 +254,9 @@ def merge_and_recalc_sync(df, quote):
             'volume': quote['volume'],
             'date': quote_date 
         }
-        
+         
         df_mod = df.copy()
-        
+         
         if last_date == quote_date:
             for col in ['open', 'high', 'low', 'close', 'volume']:
                 if col == 'high':
@@ -269,7 +269,7 @@ def merge_and_recalc_sync(df, quote):
             new_df = pd.DataFrame([new_row])
             new_df = new_df.set_index('date')
             df_mod = pd.concat([df_mod, new_df])
-        
+         
         if 'marketCap' in quote:
             df_mod.attrs['marketCap'] = quote['marketCap']
             
@@ -297,15 +297,15 @@ def _safely_process_fmp_data(data, sym):
 async def fetch_historical_batch(symbols: list, days=None):
     if not symbols: return {}
     if days is None: days = CONFIG["system"]["history_days"]
-    
+     
     results = {}
     now = datetime.now()
     from_date = (now - timedelta(days=days + 60)).strftime("%Y-%m-%d") 
     to_date = now.strftime("%Y-%m-%d")
-    
+     
     connector = aiohttp.TCPConnector(limit=15)
     semaphore = asyncio.Semaphore(15)
-    
+     
     headers = {
         "User-Agent": "Mozilla/5.0 (StockBot/1.0)",
         "Accept": "application/json"
@@ -320,11 +320,11 @@ async def fetch_historical_batch(symbols: list, days=None):
                         logging.warning(f"[429 Rate Limit] {sym}. Retrying in 5s...")
                         await asyncio.sleep(5)
                         response = await session.get(url, ssl=False)
-                        
+                         
                     if response.status == 200:
                         data = await response.json()
                         df = await asyncio.to_thread(_safely_process_fmp_data, data, sym)
-                        
+                         
                         if df is not None and not df.empty:
                             results[sym] = df
                         else:
@@ -345,7 +345,7 @@ async def fetch_realtime_quotes(symbols: list):
     connector = aiohttp.TCPConnector(limit=20)
     semaphore = asyncio.Semaphore(20)
     headers = {"User-Agent": "StockBot/1.0", "Accept": "application/json"}
-    
+     
     async def fetch_single_quote(session, sym):
         url = f"https://financialmodelingprep.com/stable/quote?symbol={sym}&apikey={FMP_API_KEY}"
         async with semaphore:
@@ -382,6 +382,29 @@ def linreg_trend(points, min_r2):
     if r_sq < min_r2: return None
     return slope, intercept, r_sq
 
+def detect_visual_channel(df, window=20):
+    """
+    计算最近 window 天的通道线 (Flag Lines)
+    用于在图表上绘制上下轨
+    """
+    if len(df) < window: return []
+    
+    recent = df.tail(window)
+    dates = recent.index
+    highs = recent['high'].values
+    lows = recent['low'].values
+    
+    # 连接起点和终点的极值来形成通道
+    # 上轨
+    p1_top = (dates[0], highs[0])
+    p2_top = (dates[-1], highs[-1])
+    
+    # 下轨
+    p1_bot = (dates[0], lows[0])
+    p2_bot = (dates[-1], lows[-1])
+    
+    return [[p1_top, p2_top], [p1_bot, p2_bot]]
+
 def identify_patterns(df):
     window = CONFIG["pattern"]["window"]
     min_r2 = CONFIG["pattern"]["min_r2"]
@@ -392,7 +415,7 @@ def identify_patterns(df):
     recent['pivot_low'] = recent['low'].rolling(5, center=True).min() == recent['low']
     high_points = recent[recent['pivot_high']]
     low_points = recent[recent['pivot_low']]
-    
+     
     if len(high_points) >= 3 and len(low_points) >= 3:
         h_data = high_points['high'].tail(8)
         l_data = low_points['low'].tail(8)
@@ -426,23 +449,21 @@ def identify_patterns(df):
                         return "放量旗形突破(机构算法)", res_line, sup_line
     return None, [], []
 
-# [修正] K线形态识别函数 - 修复 NameError
 def detect_candle_patterns(df):
     """简化的K线形态识别：早晨之星，吞没，锤子线"""
     if len(df) < 5: return []
-    
+     
     patterns = []
-    
+     
     curr = df.iloc[-1]
     prev1 = df.iloc[-2]
     prev2 = df.iloc[-3]
-    
+     
     # 实体大小
     curr_body = abs(curr['close'] - curr['open'])
     prev1_body = abs(prev1['close'] - prev1['open'])
-    # [修复] 补充定义 prev2_body
     prev2_body = abs(prev2['close'] - prev2['open'])
-    
+     
     # 1. 吞没形态 (Engulfing) - 看涨
     is_bullish_engulfing = (prev1['close'] < prev1['open']) and \
                            (curr['close'] > curr['open']) and \
@@ -458,7 +479,7 @@ def detect_candle_patterns(df):
                       (prev1_body < prev2_body * 0.3) and \
                       (curr['close'] > curr['open']) and \
                       (curr['close'] > (prev2['open'] + prev2['close'])/2)
-    
+     
     if is_morning_star: 
         patterns.append("Morning Star (早晨之星)")
         
@@ -467,12 +488,13 @@ def detect_candle_patterns(df):
     # 注意：计算方式需根据 OHLC 实际位置
     lower_shadow = min(curr['close'], curr['open']) - curr['low']
     upper_shadow = curr['high'] - max(curr['close'], curr['open'])
-    
+     
     if lower_shadow > 2 * curr_body and upper_shadow < 0.5 * curr_body:
         patterns.append("Hammer (锤子线)")
 
     return patterns
 
+# 定义在 create_alert_embed 前面，供其调用
 def get_volume_projection_factor(ny_now, minutes_elapsed):
     TOTAL_MINUTES = 390
     if minutes_elapsed <= 10:
@@ -495,12 +517,12 @@ def check_signals_sync(df):
     low_60 = df['low'].tail(60).min()
     if curr['close'] > low_60 * CONFIG["filter"]["max_60d_gain"]: return False, 0, "RISK_FILTER", [], []
     prev_close_safe = prev['close'] if prev['close'] > 0 else 1.0
-    
+     
     day_gain = (curr['close'] - prev['close']) / prev_close_safe
 
     if abs(day_gain) > CONFIG["filter"]["max_day_change"]: return False, 0, "RISK_FILTER", [], []
     if curr['RSI'] > CONFIG["filter"]["max_rsi"]: return False, 0, "RISK_FILTER", [], []
-    
+     
     if curr['BIAS_50'] > CONFIG["filter"]["max_bias_50"]:
           return False, 0, "RISK_OVEREXTENDED", [], []
 
@@ -510,9 +532,9 @@ def check_signals_sync(df):
     ny_now = datetime.now(MARKET_TIMEZONE)
     market_open = ny_now.replace(hour=9, minute=30, second=0, microsecond=0)
     minutes_elapsed = (ny_now - market_open).total_seconds() / 60
-    
+     
     is_open_market = 0 < minutes_elapsed < 390
-    
+     
     if is_open_market:
         safe_minutes = max(minutes_elapsed, 1) 
         projection_factor = get_volume_projection_factor(ny_now, safe_minutes)
@@ -531,7 +553,7 @@ def check_signals_sync(df):
         vol_threshold = CONFIG["filter"]["min_vol_ratio"]
         
     is_heavy_volume = proj_vol > curr['Vol_MA20'] * vol_threshold
-    
+     
     if is_heavy_volume and proj_vol > curr['Vol_MA20'] * 2.0:
         score += weights["HEAVY_VOLUME"]
 
@@ -546,7 +568,7 @@ def check_signals_sync(df):
     # 策略 1: BB Squeeze 
     bb_min_width = CONFIG["filter"]["min_bb_squeeze_width"]
     bb_open_width = bb_min_width * 1.05 
-    
+     
     if prev['BB_Width'] < bb_min_width: 
         if curr['BB_Width'] > bb_open_width and curr['close'] > curr['BB_Mid']: 
             if curr['ADX'] > CONFIG["filter"]["min_adx_for_squeeze"] and curr['PDI'] > curr['MDI']:
@@ -556,7 +578,7 @@ def check_signals_sync(df):
     # 策略 2: Nx 蓝梯 
     recent_10 = df.tail(10)
     had_breakout = (recent_10['close'] > recent_10['Nx_Blue_UP']).any()
-    
+     
     is_low_close_ok = curr['low'] >= curr['Nx_Blue_DW'] * 0.99 and curr['close'] >= curr['Nx_Blue_UP']
     on_support = curr['close'] > curr['Nx_Blue_DW'] and is_low_close_ok
     is_positive_candle = curr['close'] > curr['open']
@@ -580,11 +602,11 @@ def check_signals_sync(df):
         if curr['PDI'] > curr['MDI']:
             triggers.append(f"Nx 蓝梯突破: 趋势转多确认")
             score += weights["NX_BREAKOUT"]
-    
+     
     # 策略 4: MACD 零轴金叉
     is_zero_cross = prev['DIF'] < 0 and curr['DIF'] > 0 and curr['DIF'] > curr['DEA']
     is_momentum_increasing = curr['MACD'] > df['MACD'].iloc[-2]
-    
+     
     if is_zero_cross and is_momentum_increasing:
         if curr['RSI'] < 70:
             triggers.append(f"MACD 零轴金叉: 中线多头启动 + 动能增强")
@@ -593,11 +615,11 @@ def check_signals_sync(df):
     # 策略 5: KDJ / MACD
     price_low_20 = df['close'].tail(20).min()
     price_is_low = curr['close'] <= price_low_20 * 1.02
-    
+     
     if prev['J'] < 0 and curr['J'] > 0 and curr['K'] > curr['D']:
         triggers.append(f"KDJ 绝地反击: 极度超卖 J 值回升")
         score += weights["KDJ_REBOUND"]
-    
+     
     macd_low_20 = df['MACD'].tail(20).min()
     if price_is_low and curr['MACD'] < 0:
         if curr['MACD'] > macd_low_20 * 0.8:
@@ -608,7 +630,7 @@ def check_signals_sync(df):
     # 策略 6: 抛售高潮 (小盘股)
     pinbar_ratio = (curr['close'] - curr['low']) / (curr['high'] - curr['low'] + 1e-9)
     market_cap = df.attrs.get('marketCap', float('inf')) 
-    
+     
     if curr['low'] < curr['BB_Low']:
         if proj_vol > curr['Vol_MA20'] * 2.5:
             if pinbar_ratio > 0.5:
@@ -625,7 +647,7 @@ async def check_signals(df):
 
 def _generate_chart_sync(df, ticker, res_line=[], sup_line=[]):
     buf = io.BytesIO()
-    
+     
     last_close = df['close'].iloc[-1]
     last_atr = df['ATR'].iloc[-1] if 'ATR' in df.columns else last_close * 0.05
     stop_price = last_close - 2 * last_atr
@@ -633,7 +655,7 @@ def _generate_chart_sync(df, ticker, res_line=[], sup_line=[]):
     s = mpf.make_marketcolors(up='r', down='g', inherit=True)
     my_style = mpf.make_mpf_style(base_mpl_style="ggplot", marketcolors=s, gridstyle=":")
     plot_df = df.tail(80)
-    
+     
     stop_line = [stop_price] * len(plot_df)
 
     add_plots = [
@@ -646,16 +668,24 @@ def _generate_chart_sync(df, ticker, res_line=[], sup_line=[]):
         mpf.make_addplot(plot_df['DIF'], panel=2, color='orange'),
         mpf.make_addplot(plot_df['DEA'], panel=2, color='blue'),
     ]
-    
-    kwargs = dict(type='candle', style=my_style, title=f"{ticker} Analysis", ylabel='Price', addplot=add_plots, volume=True, panel_ratios=(6, 2, 2), tight_layout=True, savefig=buf)
-    
+     
+    # [修改] 使用 bbox_inches='tight', pad_inches=0 去除留白
+    kwargs = dict(type='candle', style=my_style, title=f"{ticker} Analysis", ylabel='Price', addplot=add_plots, volume=True, panel_ratios=(6, 2, 2), tight_layout=True, savefig=dict(fname=buf, format='png', bbox_inches='tight', pad_inches=0))
+     
     all_lines = []
+    
+    # [新增] 始终添加可视化的旗形通道线 (Flag Lines)
+    visual_flags = detect_visual_channel(plot_df, window=20)
+    if visual_flags:
+        all_lines.extend(visual_flags)
+
+    # 添加策略检测到的特定趋势线
     if res_line: all_lines.extend(res_line)
     if sup_line: all_lines.extend(sup_line)
         
     if all_lines:
-        kwargs['alines'] = dict(alines=all_lines, colors='darkgray', linewidths=2.0, linestyle='-')
-    
+        kwargs['alines'] = dict(alines=all_lines, colors='darkgray', linewidths=1.5, linestyle='-.')
+     
     try:
         mpf.plot(plot_df, **kwargs)
         buf.seek(0)
@@ -717,50 +747,69 @@ def get_level_by_score(score):
     if score >= 70: return CONFIG["SCORE"]["EMOJI"].get(70, "LOW")
     return CONFIG["SCORE"]["EMOJI"].get(60, "TEST") 
 
-# [新增] 创建详细卡片 Embed 函数
+# [修改] 创建详细卡片 Embed 函数 - 移除所有 Emoji
+# [关键修复] 量比计算：增加 intraday projection 逻辑，避免出现 0.1x
+# [优化] 显示标签根据盘中/盘后自动切换，Footer 增加 ET 时间
 def create_alert_embed(ticker, score, price, reason, support, df, filename):
     level_str = get_level_by_score(score)
     color = 0x00ff00 if score >= 80 else 0x3498db
     
-    embed = discord.Embed(title=f"📊 {ticker} 深度分析 | 得分 {score}", color=color)
-    embed.description = f"**当前价格:** `${price:.2f}`\n**信号级别:** {level_str}"
+    # 移除标题 Emoji
+    embed = discord.Embed(title=f"{ticker} Deep Analysis | Score {score}", color=color)
+    embed.description = f"**Price:** `${price:.2f}`\n**Level:** {level_str}"
     
-    # 1. 核心指标面板
     curr = df.iloc[-1]
-    prev_vol = df.iloc[-2]['volume'] if df.iloc[-2]['volume'] > 0 else 1
-    vol_ratio = curr['volume'] / df['Vol_MA20'].iloc[-1]
+    
+    # --- 量比修正逻辑 ---
+    ny_now = datetime.now(MARKET_TIMEZONE)
+    market_open = ny_now.replace(hour=9, minute=30, second=0, microsecond=0)
+    minutes_elapsed = (ny_now - market_open).total_seconds() / 60
+    
+    vol_label = "**Vol Ratio:**"
+    vol_ratio = 0.0
+    
+    # 判断是否在盘中 (0-390分钟)
+    if 0 < minutes_elapsed < 390:
+        vol_label = "**Vol Ratio (Proj):**" # 盘中显示预测标签
+        proj_factor = get_volume_projection_factor(ny_now, max(minutes_elapsed, 1))
+        projected_vol = curr['volume'] * proj_factor
+        vol_ratio = projected_vol / df['Vol_MA20'].iloc[-1]
+    else:
+        vol_label = "**Vol Ratio:**" # 盘后显示正常标签
+        vol_ratio = curr['volume'] / df['Vol_MA20'].iloc[-1]
     
     indicator_text = (
-        f"📈 **RSI(14):** `{curr['RSI']:.1f}`\n"
-        f"🎯 **ADX:** `{curr['ADX']:.1f}`\n"
-        f"📊 **量比:** `{vol_ratio:.1f}x`\n"
-        f"🌊 **MACD:** `{curr['MACD']:.2f}`\n"
-        f"📉 **Bias(50):** `{curr['BIAS_50']*100:.1f}%`"
+        f"**RSI(14):** `{curr['RSI']:.1f}`\n"
+        f"**ADX:** `{curr['ADX']:.1f}`\n"
+        f"{vol_label} `{vol_ratio:.1f}x`\n"  # 使用动态标签
+        f"**MACD:** `{curr['MACD']:.2f}`\n"
+        f"**Bias(50):** `{curr['BIAS_50']*100:.1f}%`"
     )
-    embed.add_field(name="指标状态", value=indicator_text, inline=True)
+    embed.add_field(name="Indicators", value=indicator_text, inline=True)
     
-    # 2. 风险管理面板 (DeepSeek 建议4)
-    # 假设账户 $10,000，风险 2%
+    # 2. 风险管理面板 (移除 Emoji)
     risk_per_trade = 10000 * 0.02
     risk_diff = price - support
     shares = int(risk_per_trade / risk_diff) if risk_diff > 0 else 0
     
     risk_text = (
-        f"🛑 **动态止损:** `${support:.2f}`\n"
-        f"💰 **建议仓位:** `{shares}股`\n"
-        f"*(基于$10k本金/2%风险)*"
+        f"**Stop Loss:** `${support:.2f}`\n"
+        f"**Position:** `{shares} shares`\n"
+        f"*(Based on $10k/2% risk)*"
     )
-    embed.add_field(name="风险管理", value=risk_text, inline=True)
+    embed.add_field(name="Risk Mgmt", value=risk_text, inline=True)
     
     # 3. 触发原因
-    embed.add_field(name="🚀 触发逻辑", value=f"```{reason}```", inline=False)
+    embed.add_field(name="Trigger Reason", value=f"```{reason}```", inline=False)
     
-    # 4. 风险警告 (DeepSeek 建议8)
+    # 4. 风险警告
     if curr['RSI'] > 75:
-        embed.add_field(name="⚠️ 风险提示", value="RSI 进入超买区域，注意回调", inline=False)
+        embed.add_field(name="Warning", value="RSI Overbought, expect pullback", inline=False)
     
     embed.set_image(url=f"attachment://{filename}")
-    embed.set_footer(text=f"StockBot Analysis • {datetime.now().strftime('%H:%M:%S')}")
+    
+    # [优化] Footer 时间显示 ET
+    embed.set_footer(text=f"StockBot Analysis • {ny_now.strftime('%H:%M:%S')} ET")
     
     return embed
 
@@ -931,10 +980,11 @@ class StockBotClient(discord.Client):
                     finally:
                         chart_buf.close() 
                 else:
-                    summary_list.append(f"**{ticker}** ({score}分)")
+                    summary_list.append(f"**{ticker}** ({score})")
 
             if summary_list:
-                summary_msg = f"📋 **其他触发信号 (简报)**:\n" + " | ".join(summary_list)
+                # 移除摘要中的 Emoji
+                summary_msg = f"**Other Alerts (Summary)**:\n" + " | ".join(summary_list)
                 try: 
                     await self.alert_channel.send(content=summary_msg)
                 except: pass
@@ -946,8 +996,8 @@ class StockBotClient(discord.Client):
 intents = discord.Intents.default()
 client = StockBotClient(intents=intents)
 
-@client.tree.command(name="watch_add", description="批量添加关注 (如: AAPL, TSLA)")
-@app_commands.describe(codes="股票代码")
+@client.tree.command(name="watch_add", description="Add stocks to watch list (e.g., AAPL, TSLA)")
+@app_commands.describe(codes="Stock Symbols")
 async def watch_add(interaction: discord.Interaction, codes: str):
     await interaction.response.defer()
     user_data = get_user_data(interaction.user.id)
@@ -956,10 +1006,10 @@ async def watch_add(interaction: discord.Interaction, codes: str):
     current_set.update(new_list)
     user_data["stocks"] = list(current_set)
     save_settings()
-    await interaction.followup.send(f"已关注: `{', '.join(new_list)}`")
+    await interaction.followup.send(f"Added: `{', '.join(new_list)}`")
 
-@client.tree.command(name="watch_remove", description="批量移除关注")
-@app_commands.describe(codes="股票代码")
+@client.tree.command(name="watch_remove", description="Remove stocks from watch list")
+@app_commands.describe(codes="Stock Symbols")
 async def watch_remove(interaction: discord.Interaction, codes: str):
     await interaction.response.defer()
     user_data = get_user_data(interaction.user.id)
@@ -971,27 +1021,27 @@ async def watch_remove(interaction: discord.Interaction, codes: str):
         keys_to_del = [k for k in user_data['daily_status'] if k.startswith(t)]
         for k in keys_to_del: del user_data['daily_status'][k]
     save_settings()
-    await interaction.followup.send(f"已移除: `{', '.join(to_remove)}`")
+    await interaction.followup.send(f"Removed: `{', '.join(to_remove)}`")
 
-@client.tree.command(name="watch_list", description="查看我的关注列表")
+@client.tree.command(name="watch_list", description="Show my watch list")
 async def watch_list(interaction: discord.Interaction):
     stocks = get_user_data(interaction.user.id)["stocks"]
     if len(stocks) > 60: display_str = ", ".join(stocks[:60]) + f"... ({len(stocks)})"
-    else: display_str = ", ".join(stocks) if stocks else '空'
-    await interaction.response.send_message(f"列表:\n`{display_str}`", ephemeral=True)
+    else: display_str = ", ".join(stocks) if stocks else 'Empty'
+    await interaction.response.send_message(f"List:\n`{display_str}`", ephemeral=True)
 
-@client.tree.command(name="watch_clear", description="清空所有关注")
+@client.tree.command(name="watch_clear", description="Clear all watched stocks")
 async def watch_clear(interaction: discord.Interaction):
     user_data = get_user_data(interaction.user.id)
     user_data["stocks"] = []
     user_data["daily_status"] = {}
     save_settings()
-    await interaction.response.send_message("已清空。", ephemeral=True)
+    await interaction.response.send_message("Cleared.", ephemeral=True)
 
-@client.tree.command(name="watch_import", description="一键导入推荐列表")
+@client.tree.command(name="watch_import", description="Import preset lists")
 @app_commands.choices(preset=[
-    app_commands.Choice(name="纳指100 (NASDAQ 100)", value="NASDAQ_100"),
-    app_commands.Choice(name="神级热门 (GOD TIER)", value="GOD_TIER")
+    app_commands.Choice(name="NASDAQ 100", value="NASDAQ_100"),
+    app_commands.Choice(name="GOD TIER", value="GOD_TIER")
 ])
 async def watch_import(interaction: discord.Interaction, preset: app_commands.Choice[str]):
     await interaction.response.defer()
@@ -1001,15 +1051,15 @@ async def watch_import(interaction: discord.Interaction, preset: app_commands.Ch
     current_set.update(new_list)
     user_data["stocks"] = list(current_set)
     save_settings()
-    await interaction.followup.send(f"已导入 {preset.name} (共 {len(new_list)} 只)。")
+    await interaction.followup.send(f"Imported {preset.name} ({len(new_list)} stocks).")
 
-@client.tree.command(name="stats", description="查看历史信号胜率")
+@client.tree.command(name="stats", description="View historical signal accuracy")
 async def stats_command(interaction: discord.Interaction):
     await interaction.response.defer()
     await update_stats_data()
     history = settings.get("signal_history", {})
     if not history:
-        await interaction.followup.send("暂无数据。")
+        await interaction.followup.send("No data.")
         return
     stats = {
         "1d": {"c":0, "w":0, "r":0}, "5d": {"c":0, "w":0, "r":0}, "20d": {"c":0, "w":0, "r":0}
@@ -1036,33 +1086,33 @@ async def stats_command(interaction: discord.Interaction):
                 if r1 is not None: rets.append(f"1D:{r1}%")
                 if r5 is not None: rets.append(f"1W:{r5}%")
                 if r20 is not None: rets.append(f"1M:{r20}%")
-                ret_str = " | ".join(rets) if rets else "等待回测"
-                recent.append(f"`{d}` {level_str} **{t}** ({score}分)\n╚ {ret_str}")
+                ret_str = " | ".join(rets) if rets else "Pending"
+                recent.append(f"`{d}` {level_str} **{t}** ({score})\n - {ret_str}")
 
-    embed = discord.Embed(title="多周期回测统计", description="（基于信号分数）", color=0x00BFFF)
+    embed = discord.Embed(title="Backtest Stats", description="(Based on signals)", color=0x00BFFF)
     def mk_stat(k, l):
         s = stats[k]
-        if s["c"]==0: return f"{l}: 无数据"
-        return f"**{l}**\n胜: `{s['w']/s['c']*100:.1f}%`\n盈: `{s['r']/s['c']:.2f}%`"
+        if s["c"]==0: return f"{l}: No Data"
+        return f"**{l}**\nWin: `{s['w']/s['c']*100:.1f}%`\nAvg: `{s['r']/s['c']:.2f}%`"
         
-    embed.add_field(name="1 Day", value=mk_stat("1d", "次日"), inline=True)
-    embed.add_field(name="5 Days", value=mk_stat("5d", "一周"), inline=True)
-    embed.add_field(name="20 Days", value=mk_stat("20d", "一月"), inline=True)
-    if recent: embed.add_field(name="最近信号", value="\n".join(recent), inline=False)
+    embed.add_field(name="1 Day", value=mk_stat("1d", "Next Day"), inline=True)
+    embed.add_field(name="5 Days", value=mk_stat("5d", "1 Week"), inline=True)
+    embed.add_field(name="20 Days", value=mk_stat("20d", "1 Month"), inline=True)
+    if recent: embed.add_field(name="Recent Signals", value="\n".join(recent), inline=False)
     await interaction.followup.send(embed=embed)
 
-@client.tree.command(name="test", description="测试单股")
+@client.tree.command(name="test", description="Test single stock")
 async def test_command(interaction: discord.Interaction, ticker: str):
     await interaction.response.defer()
     ticker = ticker.upper().strip()
     
-    logging.info(f"[TEST 指令收到] 正在测试: {ticker}")
+    logging.info(f"[TEST Command] Testing: {ticker}")
 
     data_map = await fetch_historical_batch([ticker])
     quotes_map = await fetch_realtime_quotes([ticker])
     
     if not data_map or ticker not in data_map:
-        await interaction.followup.send(f"失败 `{ticker}` (请查看后台详细日志，可能被403/429拦截或数据解析失败)")
+        await interaction.followup.send(f"Failed `{ticker}` (Check logs for 403/429 or data error)")
         return
         
     df = data_map[ticker]
@@ -1076,7 +1126,7 @@ async def test_command(interaction: discord.Interaction, ticker: str):
     stop_loss = price - (2 * atr_val)
 
     if not reason or score < CONFIG["SCORE"]["MIN_ALERT_SCORE"]: 
-        reason = f"信号触发失败 (Score: {score})。最高指标：RSI={df['RSI'].iloc[-1]:.1f}, ADX={df['ADX'].iloc[-1]:.1f}"
+        reason = f"Signal Low/Fail (Score: {score}). Max Indicators: RSI={df['RSI'].iloc[-1]:.1f}, ADX={df['ADX'].iloc[-1]:.1f}"
     
     chart_buf = await generate_chart(df, ticker, r_l, s_l)
     filename = f"{ticker}_test.png"
@@ -1089,7 +1139,7 @@ async def test_command(interaction: discord.Interaction, ticker: str):
         await interaction.followup.send(embed=embed, file=f)
     except Exception as e:
         logging.error(f"Send Error: {e}")
-        await interaction.followup.send(f"发送图片失败: {e}")
+        await interaction.followup.send(f"Failed to send image: {e}")
     finally:
         chart_buf.close()
 
