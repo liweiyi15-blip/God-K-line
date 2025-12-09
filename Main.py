@@ -426,7 +426,7 @@ def identify_patterns(df):
                         return "放量旗形突破(机构算法)", res_line, sup_line
     return None, [], []
 
-# [新增] K线形态识别函数
+# [修正] K线形态识别函数 - 修复 NameError
 def detect_candle_patterns(df):
     """简化的K线形态识别：早晨之星，吞没，锤子线"""
     if len(df) < 5: return []
@@ -440,6 +440,8 @@ def detect_candle_patterns(df):
     # 实体大小
     curr_body = abs(curr['close'] - curr['open'])
     prev1_body = abs(prev1['close'] - prev1['open'])
+    # [修复] 补充定义 prev2_body
+    prev2_body = abs(prev2['close'] - prev2['open'])
     
     # 1. 吞没形态 (Engulfing) - 看涨
     is_bullish_engulfing = (prev1['close'] < prev1['open']) and \
@@ -457,12 +459,11 @@ def detect_candle_patterns(df):
                       (curr['close'] > curr['open']) and \
                       (curr['close'] > (prev2['open'] + prev2['close'])/2)
     
-    if is_morning_star: # 变量名需修正，这里简化处理
-        pass # 简化起见，防止引用未定义变量，暂时略过复杂逻辑
+    if is_morning_star: 
+        patterns.append("Morning Star (早晨之星)")
         
     # 3. 锤子线 (Hammer)
     # 下影线 >= 2倍实体，上影线很小
-    shadow_ratio = (curr['low'] - min(curr['close'], curr['open'])) / (curr_body + 1e-9)
     # 注意：计算方式需根据 OHLC 实际位置
     lower_shadow = min(curr['close'], curr['open']) - curr['low']
     upper_shadow = curr['high'] - max(curr['close'], curr['open'])
