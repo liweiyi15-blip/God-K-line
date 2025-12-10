@@ -10,7 +10,6 @@ import numpy as np
 import pytz
 from dotenv import load_dotenv
 from collections import defaultdict
-from scipy.stats import linregress
 import aiohttp
 import io
 import matplotlib
@@ -39,14 +38,12 @@ except (TypeError, ValueError):
 # --- 全局配置 ---
 MARKET_TIMEZONE = pytz.timezone('America/New_York')
 
-# 适配 Railway Volume 路径
 SETTINGS_FILE = "/app/data/settings.json"
 if not os.path.exists("/app/data"):
     SETTINGS_FILE = "settings.json"
 
 TIME_PRE_MARKET_START = time(9, 0)
 TIME_MARKET_OPEN = time(9, 30)
-# [修改] 自动扫描开始时间推迟到 10:00，避开开盘剧烈波动
 TIME_MARKET_SCAN_START = time(10, 0) 
 TIME_MARKET_CLOSE = time(16, 0)
 
@@ -58,15 +55,11 @@ CONFIG = {
         "max_bias_50": 0.45,
         "max_upper_shadow": 0.4,
         "max_day_change": 0.15,
-        
-        # [修改] 量比门槛大幅降低，只做粗筛
-        "min_vol_ratio": 1.2, 
-        
+        "min_vol_ratio": 1.2, # 粗筛门槛
         "min_bb_squeeze_width": 0.08, 
         "min_adx_for_squeeze": 15
     },
     "pattern": {
-        # [修改] 移除 R2 配置，改用 pivots 窗口
         "pivot_window": 5 
     },
     "system": {
@@ -78,10 +71,10 @@ CONFIG = {
         "MIN_ALERT_SCORE": 70, 
         "WEIGHTS": {
             "GOD_TIER_NX": 40,    
-            "PATTERN_BREAK": 30,  # 提高形态突破权重
+            "PATTERN_BREAK": 30,  
             "BB_SQUEEZE": 15,         
-            "STRONG_ADX": 20,     # 趋势权重
-            "ADX_ACTIVATION": 15, # [新增] 趋势激活权重
+            "STRONG_ADX": 20,     
+            "ADX_ACTIVATION": 15, 
             "HEAVY_VOLUME": 10,   
             "KDJ_REBOUND": 8,        
             "MACD_ZERO_CROSS": 8, 
@@ -372,124 +365,90 @@ async def fetch_realtime_quotes(symbols: list):
         await asyncio.gather(*tasks_list)
     return quotes_map
 
-# [新增] 寻找K线高低点 (Pivot Points)
 def find_pivots(df, window=5):
-    """
-    寻找局部高点和低点
-    window: 左右各检查多少根K线
-    """
     highs = df['high'].values
     lows = df['low'].values
     dates = df.index
     
-    pivots_high = [] # (index, price)
+    pivots_high = [] 
     pivots_low = []
     
-    # 遍历寻找峰谷 (注意：这里只看过去数据，确保不含未来函数)
-    # 为了简化，我们只找最近60天内的明显拐点
     start_idx = max(0, len(df) - 60)
     
     for i in range(start_idx + window, len(df) - window):
         is_high = True
         is_low = True
-        
         current_high = highs[i]
         current_low = lows[i]
         
-        # 检查左右 window 范围
         for j in range(1, window + 1):
             if highs[i-j] >= current_high or highs[i+j] > current_high:
                 is_high = False
             if lows[i-j] <= current_low or lows[i+j] < current_low:
                 is_low = False
         
-        if is_high:
-            pivots_high.append((dates[i], current_high, i)) # date, price, iloc_index
-        if is_low:
-            pivots_low.append((dates[i], current_low, i))
+        if is_high: pivots_high.append((dates[i], current_high, i))
+        if is_low: pivots_low.append((dates[i], current_low, i))
             
     return pivots_high, pivots_low
 
-# [修改] 基于Pivot的高低点连接形态识别
 def identify_patterns(df):
     """
-    使用高低点连线法识别收敛形态
+    不管是否突破，都返回最近的趋势线供画图使用
     """
     if len(df) < 30: return None, [], []
     
-    # 1. 获取关键点
     pivots_high, pivots_low = find_pivots(df, window=4)
     
-    if len(pivots_high) < 2 or len(pivots_low) < 2:
-        return None, [], []
-        
-    # 取最近的两个高点和两个低点
-    ph1, ph2 = pivots_high[-2], pivots_high[-1] # ph2 is newer
-    pl1, pl2 = pivots_low[-2], pivots_low[-1]
-    
-    # 计算阻力线 (Res) 和 支撑线 (Sup) 的斜率 (Slope)
-    # y = mx + c
-    # x 使用 integer index 方便计算
-    
-    # 阻力线 (连接两个高点)
-    x1_res, y1_res = ph1[2], ph1[1]
-    x2_res, y2_res = ph2[2], ph2[1]
-    
-    if x2_res == x1_res: return None, [], []
-    m_res = (y2_res - y1_res) / (x2_res - x1_res)
-    c_res = y1_res - m_res * x1_res
-    
-    # 支撑线 (连接两个低点)
-    x1_sup, y1_sup = pl1[2], pl1[1]
-    x2_sup, y2_sup = pl2[2], pl2[1]
-    
-    if x2_sup == x1_sup: return None, [], []
-    m_sup = (y2_sup - y1_sup) / (x2_sup - x1_sup)
-    c_sup = y1_sup - m_sup * x1_sup
-    
-    # 形态判断:
-    # 1. 阻力线向下 (m_res < 0) 或者是平的
-    # 2. 支撑线向上 (m_sup > 0) 或者跌得比阻力线慢
-    # 3. 收敛: m_sup > m_res
-    
-    if m_res < 0.005 and (m_sup > m_res + 0.01):
-        # 计算今日预估阻力位
-        curr_idx = len(df) - 1
-        curr_price = df['close'].iloc[-1]
-        
-        res_today = m_res * curr_idx + c_res
-        
-        # 突破判定: 收盘价 > 阻力线
-        if curr_price > res_today:
-            # 构建画线数据 (从第一个点画到当前)
-            start_date = df.index[min(ph1[2], pl1[2])]
-            start_idx = min(ph1[2], pl1[2])
-            end_date = df.index[-1]
-            
-            p1_res = m_res * start_idx + c_res
-            p2_res = m_res * curr_idx + c_res
-            
-            p1_sup = m_sup * start_idx + c_sup
-            p2_sup = m_sup * curr_idx + c_sup
-            
-            res_line = [[(start_date, p1_res), (end_date, p2_res)]]
-            sup_line = [[(start_date, p1_sup), (end_date, p2_sup)]]
-            
-            return "形态突破 (高低点收敛)", res_line, sup_line
+    # [修改] 只要找到两个点，就准备画线，不直接返回空
+    res_line, sup_line = [], []
+    pattern_name = None
 
-    return None, [], []
-
-def detect_visual_channel(df, window=20):
-    if len(df) < window: return []
-    recent = df.tail(window)
-    dates = recent.index
-    highs = recent['high'].values
-    lows = recent['low'].values
-    p1_top = (dates[0], highs[0])
-    p2_top = (dates[-1], highs[-1])
-    p1_bot = (dates[0], lows[0])
-    p2_bot = (dates[-1], lows[-1])
-    return [[p1_top, p2_top], [p1_bot, p2_bot]]
+    if len(pivots_high) >= 2:
+        ph1, ph2 = pivots_high[-2], pivots_high[-1]
+        x1, y1 = ph1[2], ph1[1]
+        x2, y2 = ph2[2], ph2[1]
+        if x2 != x1:
+            m = (y2 - y1) / (x2 - x1)
+            c = y1 - m * x1
+            # 延伸到当前
+            curr_idx = len(df) - 1
+            start_idx = min(x1, x2) # 画长一点
+            
+            p_start = m * start_idx + c
+            p_end = m * curr_idx + c
+            
+            t_start = df.index[start_idx]
+            t_end = df.index[curr_idx]
+            res_line = [[(t_start, p_start), (t_end, p_end)]]
+            
+            # 只有在画线成功时才判断逻辑
+            if len(pivots_low) >= 2:
+                pl1, pl2 = pivots_low[-2], pivots_low[-1]
+                lx1, ly1 = pl1[2], pl1[1]
+                lx2, ly2 = pl2[2], pl2[1]
+                
+                if lx2 != lx1:
+                    lm = (ly2 - ly1) / (lx2 - lx1)
+                    lc = ly1 - lm * lx1
+                    
+                    lp_start = lm * min(lx1, lx2) + lc
+                    lp_end = lm * curr_idx + lc
+                    lt_start = df.index[min(lx1, lx2)]
+                    sup_line = [[(lt_start, lp_start), (t_end, lp_end)]]
+                    
+                    # 核心突破逻辑判断
+                    # 1. 阻力线向下或走平 (m < 0.005)
+                    # 2. 支撑线向上 (lm > 0) 或 跌幅更缓
+                    # 3. 价格突破阻力线
+                    curr_price = df['close'].iloc[-1]
+                    res_today = m * curr_idx + c
+                    
+                    if m < 0.005 and (lm > m + 0.01):
+                         if curr_price > res_today:
+                             pattern_name = "形态突破 (收敛三角/旗形)"
+    
+    return pattern_name, res_line, sup_line
 
 def detect_candle_patterns(df):
     if len(df) < 5: return []
@@ -505,21 +464,16 @@ def detect_candle_patterns(df):
                            (curr['close'] > curr['open']) and \
                            (curr['open'] < prev1['close']) and \
                            (curr['close'] > prev1['open'])
-                           
-    if is_bullish_engulfing:
-        patterns.append("Bullish Engulfing (吞没)")
+    if is_bullish_engulfing: patterns.append("Bullish Engulfing (吞没)")
         
     is_morning_star = (prev2['close'] < prev2['open']) and \
                       (prev1_body < prev2_body * 0.3) and \
                       (curr['close'] > curr['open']) and \
                       (curr['close'] > (prev2['open'] + prev2['close'])/2)
-      
-    if is_morning_star: 
-        patterns.append("Morning Star (早晨之星)")
+    if is_morning_star: patterns.append("Morning Star (早晨之星)")
         
     lower_shadow = min(curr['close'], curr['open']) - curr['low']
     upper_shadow = curr['high'] - max(curr['close'], curr['open'])
-      
     if lower_shadow > 2 * curr_body and upper_shadow < 0.5 * curr_body:
         patterns.append("Hammer (锤子线)")
 
@@ -527,16 +481,11 @@ def detect_candle_patterns(df):
 
 def get_volume_projection_factor(ny_now, minutes_elapsed):
     TOTAL_MINUTES = 390
-    if minutes_elapsed <= 10:
-        return 13.0
-    elif minutes_elapsed <= 60:
-        factor = 13.0 - (13.0 - 8.0) * (minutes_elapsed - 10) / 50
-        return factor
-    else:
-        factor = 8.0 - (8.0 - 4.0) * (minutes_elapsed - 60) / (TOTAL_MINUTES - 60)
-        return factor
+    if minutes_elapsed <= 10: return 13.0
+    elif minutes_elapsed <= 60: return 13.0 - (13.0 - 8.0) * (minutes_elapsed - 10) / 50
+    else: return 8.0 - (8.0 - 4.0) * (minutes_elapsed - 60) / (TOTAL_MINUTES - 60)
 
-# --- 核心信号检查函数 (已修改为裸分机制) ---
+# --- 核心信号检查函数 (彻底修复裸分机制) ---
 def check_signals_sync(df):
     if len(df) < 60: return False, 0, "数据不足", [], []
     
@@ -545,66 +494,60 @@ def check_signals_sync(df):
     triggers = []
     score = 0
     weights = CONFIG["SCORE"]["WEIGHTS"]
+    violations = [] # 记录所有过滤/风险项，但不提前返回
 
-    # 1. 风险硬过滤 (Hard Filters) - 这些如果不通过，分数再高也没用，直接杀掉
+    # --- 1. 风险检查 (不返回，只记录) ---
     low_60 = df['low'].tail(60).min()
     if curr['close'] > low_60 * CONFIG["filter"]["max_60d_gain"]: 
-        return False, 0, "RISK: 短期涨幅过大", [], []
+        violations.append("RISK: 短期涨幅过大")
         
     prev_close_safe = prev['close'] if prev['close'] > 0 else 1.0
     day_gain = (curr['close'] - prev['close']) / prev_close_safe
 
     if abs(day_gain) > CONFIG["filter"]["max_day_change"]: 
-        return False, 0, "RISK: 单日波动过大", [], []
+        violations.append("RISK: 单日波动过大")
         
     if curr['RSI'] > CONFIG["filter"]["max_rsi"]: 
-        return False, 0, "RISK: RSI严重超买", [], []
+        violations.append("RISK: RSI严重超买")
       
     if curr['BIAS_50'] > CONFIG["filter"]["max_bias_50"]:
-         return False, 0, "RISK: 乖离率过大", [], []
+        violations.append("RISK: 乖离率过大")
 
     if curr['Upper_Shadow_Ratio'] > CONFIG["filter"]["max_upper_shadow"]:
-        return False, 0, "RISK: 长上影线压力", [], []
+        violations.append("RISK: 长上影线压力")
 
-    # 2. 量比检查 (针对 9:30-10:00 的特殊豁免逻辑)
+    # --- 2. 量比检查 (不返回，只记录) ---
     ny_now = datetime.now(MARKET_TIMEZONE)
     market_open = ny_now.replace(hour=9, minute=30, second=0, microsecond=0)
     minutes_elapsed = (ny_now - market_open).total_seconds() / 60
     is_open_market = 0 < minutes_elapsed < 390
     
     is_volume_ok = False
+    proj_vol_final = curr['volume']
     
-    if is_open_market and minutes_elapsed < 30:
-        # [修改] 开盘30分钟内，强制视为量能达标 (跳过检查)，防止数据误差杀掉好股
-        is_volume_ok = True
-    elif is_open_market:
-        # [修改] 10:00 之后，执行正常的量比粗筛
-        proj_factor = get_volume_projection_factor(ny_now, max(minutes_elapsed, 1))
-        # 趋势修正：如果趋势强，容忍稍微低一点的量
-        trend_modifier = 1 - (min(curr['ADX'], 40) - 20) / 200 
-        proj_factor *= max(0.8, trend_modifier)
-        
-        proj_vol = curr['volume'] * proj_factor
-        
-        # [修改] 门槛已降至 1.2
-        if proj_vol >= curr['Vol_MA20'] * CONFIG["filter"]["min_vol_ratio"]:
-            is_volume_ok = True
+    if is_open_market:
+        if minutes_elapsed < 30:
+            is_volume_ok = True # 豁免
+        else:
+            proj_factor = get_volume_projection_factor(ny_now, max(minutes_elapsed, 1))
+            trend_modifier = 1 - (min(curr['ADX'], 40) - 20) / 200 
+            proj_factor *= max(0.8, trend_modifier)
+            proj_vol_final = curr['volume'] * proj_factor
+            
+            if proj_vol_final >= curr['Vol_MA20'] * CONFIG["filter"]["min_vol_ratio"]:
+                is_volume_ok = True
     else:
-        # 盘后/盘前复盘逻辑
         if curr['volume'] >= curr['Vol_MA20'] * CONFIG["filter"]["min_vol_ratio"]:
             is_volume_ok = True
             
     if not is_volume_ok:
-        # 如果不是硬性风险，只是量不够，可以返回0分，或者作为过滤条件
-        # 这里为了严谨，量不够视为“死鱼”，直接过滤
-        return False, 0, "FILTER: 量能不足 (死鱼股)", [], []
+        violations.append("FILTER: 量能不足 (死鱼股)")
 
-    # [加分项] 如果量特别大 (2.0x)，依然给奖励分
-    proj_vol_final = curr['volume'] * (get_volume_projection_factor(ny_now, max(minutes_elapsed, 1)) if is_open_market else 1.0)
+    # [加分项] 高量比
     if proj_vol_final > curr['Vol_MA20'] * 2.0:
         score += weights["HEAVY_VOLUME"]
 
-    # --- 策略打分部分 (裸分累加) ---
+    # --- 3. 策略打分 (强制执行) ---
 
     # 策略 0: K线形态
     candle_patterns = detect_candle_patterns(df)
@@ -622,25 +565,21 @@ def check_signals_sync(df):
                 triggers.append(f"BB Squeeze: 紧缩结束+开口向上")
                 score += weights["BB_SQUEEZE"]
 
-    # 策略 2: 趋势强度 & Nx 结构
-    # [修改] 强趋势门槛降至 25
+    # 策略 2: 趋势强度 & Nx
     is_strong_trend = curr['ADX'] > 25 and curr['PDI'] > curr['MDI']
     is_adx_rising = curr['ADX'] > prev['ADX']
     
     if is_strong_trend and is_adx_rising:
         score += weights["STRONG_ADX"]
         
-    # [新增] ADX 激活 (起爆点逻辑)
-    # 逻辑: 过去10天ADX最小值的确很低(<20，盘整)，且最近3天ADX连续上升
     recent_adx_min = df['ADX'].iloc[-10:-1].min()
     adx_activating = (recent_adx_min < 20) and \
                      (df['ADX'].iloc[-1] > df['ADX'].iloc[-2] > df['ADX'].iloc[-3])
                      
     if adx_activating:
-        triggers.append(f"趋势激活: 盘整结束 ADX拐头 ({curr['ADX']:.1f})")
+        triggers.append(f"趋势激活: 盘整结束 ADX拐头")
         score += weights["ADX_ACTIVATION"]
 
-    # Nx 蓝梯逻辑
     had_breakout = (df['close'].tail(10) > df['Nx_Blue_UP'].tail(10)).any()
     on_support = (curr['low'] >= curr['Nx_Blue_DW'] * 0.99) and (curr['close'] > curr['Nx_Blue_DW'])
     
@@ -648,27 +587,27 @@ def check_signals_sync(df):
         triggers.append("Nx 结构: 蓝梯回踩确认")
         score += weights["GOD_TIER_NX"] 
 
-    # 策略 3: 形态突破 (使用新的 Pivot 逻辑)
+    # 策略 3: 形态突破 (强制计算，为了获取画线)
     pattern_name, res_line, sup_line = identify_patterns(df)
     if pattern_name:
         triggers.append(pattern_name)
         score += weights["PATTERN_BREAK"]
 
-    # 策略 4: Nx 蓝梯普通突破
+    # 策略 4: Nx 突破
     if prev['close'] < prev['Nx_Blue_UP'] and curr['close'] > curr['Nx_Blue_UP']:
         if curr['PDI'] > curr['MDI']:
             triggers.append(f"Nx 突破: 站上蓝梯")
             score += weights["NX_BREAKOUT"]
       
-    # 策略 5: MACD 零轴金叉
+    # 策略 5: MACD
     is_zero_cross = prev['DIF'] < 0 and curr['DIF'] > 0 and curr['DIF'] > curr['DEA']
     if is_zero_cross:
-        triggers.append(f"MACD 金叉: 零轴启动")
+        triggers.append(f"MACD 金叉")
         score += weights["MACD_ZERO_CROSS"]
 
-    # 策略 6: KDJ / MACD 背离
+    # 策略 6: KDJ / 背离
     if prev['J'] < 0 and curr['J'] > 0 and curr['K'] > curr['D']:
-        triggers.append(f"KDJ 反击: 超卖回升")
+        triggers.append(f"KDJ 反击")
         score += weights["KDJ_REBOUND"]
       
     price_low_20 = df['close'].tail(20).min()
@@ -679,27 +618,25 @@ def check_signals_sync(df):
              triggers.append(f"MACD 底背离")
              score += weights["MACD_DIVERGE"]
 
-    # 策略 7: 抛售高潮 (小盘股)
+    # 策略 7: 抛售
     pinbar_ratio = (curr['close'] - curr['low']) / (curr['high'] - curr['low'] + 1e-9)
     market_cap = df.attrs.get('marketCap', float('inf')) 
       
     if curr['low'] < curr['BB_Low']:
         if proj_vol_final > curr['Vol_MA20'] * 2.5:
             if pinbar_ratio > 0.5 and market_cap < 5_000_000_000:
-                triggers.append(f"抛售高潮: 恐慌盘 V 反")
+                triggers.append(f"抛售高潮")
                 score += weights["CAPITULATION"]
 
-    # [修改] 裸分机制：无论分数是否达标，都返回真实分数
-    # 只有当分数超过阈值时，is_triggered 才为 True
-    is_triggered = score >= CONFIG["SCORE"]["MIN_ALERT_SCORE"]
+    # --- 4. 最终判定 ---
+    # 只有当：分数够高 且 没有违规项 时，才触发报警
+    is_triggered = (score >= CONFIG["SCORE"]["MIN_ALERT_SCORE"]) and (len(violations) == 0)
     
-    # 如果没有触发理由，但有分数（比如纯趋势分），给个默认理由
-    if score > 0 and not triggers:
-        triggers.append("技术指标综合得分")
-    elif score == 0:
-        triggers.append("无明显信号")
+    # 构造返回的 Reason 字符串
+    final_reason_parts = triggers + violations
+    final_reason = "\n".join(final_reason_parts) if final_reason_parts else "无明显信号"
 
-    return is_triggered, score, "\n".join(triggers), res_line, sup_line
+    return is_triggered, score, final_reason, res_line, sup_line
 
 async def check_signals(df):
     return await asyncio.to_thread(check_signals_sync, df)
@@ -732,12 +669,8 @@ def _generate_chart_sync(df, ticker, res_line=[], sup_line=[]):
       
     all_lines = []
     
-    # [修改] 使用新的视觉通道辅助线
-    visual_flags = detect_visual_channel(plot_df, window=20)
-    if visual_flags:
-        all_lines.extend(visual_flags)
-
-    # 添加策略检测到的特定趋势线 (Pivot 连线)
+    # [修改] 移除 detect_visual_channel，不再画那个简陋框框线
+    # 只画策略传进来的 Pivot 连线
     if res_line: all_lines.extend(res_line)
     if sup_line: all_lines.extend(sup_line)
         
@@ -807,7 +740,11 @@ def get_level_by_score(score):
 
 def create_alert_embed(ticker, score, price, reason, support, df, filename):
     level_str = get_level_by_score(score)
-    color = 0x00ff00 if score >= 80 else 0x3498db
+    # [修改] 如果有 RISK 或 FILTER，颜色变灰/红
+    if "RISK" in reason or "FILTER" in reason:
+        color = 0x95a5a6 # Grey
+    else:
+        color = 0x00ff00 if score >= 80 else 0x3498db
     
     embed = discord.Embed(title=f"{ticker} 深度分析报告 | 得分 {score}", color=color)
     embed.description = f"**现价:** `${price:.2f}`\n**评级:** {level_str}"
@@ -850,10 +787,7 @@ def create_alert_embed(ticker, score, price, reason, support, df, filename):
     )
     embed.add_field(name="风险管理", value=risk_text, inline=True)
     
-    embed.add_field(name="触发原因", value=f"```{reason}```", inline=False)
-    
-    if curr['RSI'] > 75:
-        embed.add_field(name="风险提示", value="RSI 超买，注意回调风险", inline=False)
+    embed.add_field(name="触发详情", value=f"```{reason}```", inline=False)
     
     embed.set_image(url=f"attachment://{filename}")
     embed.set_footer(text=f"StockBot 智能分析 • {ny_now.strftime('%H:%M:%S')} ET")
@@ -887,8 +821,6 @@ class StockBotClient(discord.Client):
         curr_time, today_str = now_et.time(), now_et.strftime('%Y-%m-%d')
         
         is_pre = TIME_PRE_MARKET_START <= curr_time < TIME_MARKET_OPEN
-        
-        # [修改] 只有在 10:00 之后才开始自动扫描 (避开开盘前30分钟乱战)
         is_open_scan = TIME_MARKET_SCAN_START <= curr_time <= TIME_MARKET_CLOSE
         
         if not (is_pre or is_open_scan): return
@@ -911,7 +843,6 @@ class StockBotClient(discord.Client):
 
         hist_map = await fetch_historical_batch(list(all_tickers))
         quotes_map = {}
-        # 只要是市场开盘时间段内 (包括 9:30-10:00 手动测试)，都获取实时行情
         if TIME_MARKET_OPEN <= curr_time <= TIME_MARKET_CLOSE:
             quotes_map = await fetch_realtime_quotes(list(all_tickers))
 
@@ -1174,13 +1105,9 @@ async def test_command(interaction: discord.Interaction, ticker: str):
     atr_val = df['ATR'].iloc[-1] if 'ATR' in df.columns else (price * 0.05)
     stop_loss = price - (2 * atr_val)
 
-    # [修改] 即使没有触发警报，也会显示得分详情 (裸分机制生效)
+    # [修改] 始终显示内容，不再为空
     if not reason: 
-        reason = f"无信号 (得分: {score})"
-    else:
-        # 如果是风险过滤导致的 0 分，在理由里已经包含了 RISK 字眼
-        if score < CONFIG["SCORE"]["MIN_ALERT_SCORE"] and "RISK" not in reason and "FILTER" not in reason:
-            reason = f"分数不足 (当前: {score}, 门槛: {CONFIG['SCORE']['MIN_ALERT_SCORE']})\n" + reason
+        reason = f"无明显信号 (得分: {score})"
     
     chart_buf = await generate_chart(df, ticker, r_l, s_l)
     filename = f"{ticker}_test.png"
