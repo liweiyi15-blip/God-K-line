@@ -48,12 +48,12 @@ TIME_MARKET_OPEN = time(9, 30)
 TIME_MARKET_SCAN_START = time(10, 0) # 10点才开始报
 TIME_MARKET_CLOSE = time(16, 0)
 
-# --- 核心策略配置 ---
+# --- 核心策略配置 (优化版：防追高，抓启动) ---
 CONFIG = {
     "filter": {
-        "max_60d_gain": 3.0,
-        "max_rsi": 82,
-        "max_bias_50": 0.45,
+        "max_60d_gain": 0.6,      # [修改] 从 3.0 改为 0.6 (只看60天内涨幅<60%的，剔除妖股)
+        "max_rsi": 75,            # [修改] 从 82 改为 75 (RSI太高不追)
+        "max_bias_50": 0.20,      # [修改] 从 0.45 改为 0.20 (现价不能偏离MA50超过20%)
         "max_upper_shadow": 0.4,
         "max_day_change": 0.15,
         "min_vol_ratio": 1.2, 
@@ -71,17 +71,17 @@ CONFIG = {
     "SCORE": { 
         "MIN_ALERT_SCORE": 70, 
         "WEIGHTS": {
-            "GOD_TIER_NX": 40,    
-            "PATTERN_BREAK": 30,  
-            "BB_SQUEEZE": 15,           
+            "PATTERN_BREAK": 40,      # [修改] 提高权重：形态突破 (刚启动)
+            "NX_BREAKOUT": 35,        # [修改] 提高权重：刚站上蓝梯
+            "GOD_TIER_NX": 20,        # [修改] 降低权重：蓝梯回踩 (这是中继信号)
+            "BB_SQUEEZE": 25,         # [修改] 提高权重：布林带挤压 (变盘前夕)
             "STRONG_ADX": 20,      
-            "ADX_ACTIVATION": 15, 
+            "ADX_ACTIVATION": 20,     # [修改] 提高权重：趋势刚激活
             "HEAVY_VOLUME": 10,    
             "KDJ_REBOUND": 8,          
-            "MACD_ZERO_CROSS": 8, 
-            "NX_BREAKOUT": 7,          
+            "MACD_ZERO_CROSS": 10,    # [修改] 略微提高金叉权重
             "CANDLE_PATTERN": 5,
-            "MACD_DIVERGE": 5,        
+            "MACD_DIVERGE": 10,       # [修改] 提高权重：底背离 (底部信号)
             "CAPITULATION": 12        
         },
         "EMOJI": { 
@@ -89,7 +89,6 @@ CONFIG = {
         }
     }
 }
-
 # --- 静态股票池 ---
 STOCK_POOLS = {
     "NASDAQ_100": [
