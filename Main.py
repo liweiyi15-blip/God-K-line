@@ -42,9 +42,9 @@ SETTINGS_FILE = "/app/data/settings.json"
 if not os.path.exists("/app/data"):
     SETTINGS_FILE = "settings.json"
 
-TIME_PRE_MARKET_START = time(9, 0)
+# [修改] 删除盘前，只保留盘中扫描时间
 TIME_MARKET_OPEN = time(9, 30)
-TIME_MARKET_SCAN_START = time(10, 0) 
+TIME_MARKET_SCAN_START = time(10, 0) # 10点才开始报
 TIME_MARKET_CLOSE = time(16, 0)
 
 # --- 核心策略配置 ---
@@ -89,7 +89,7 @@ CONFIG = {
     }
 }
 
-# --- 静态股票池 ---
+# --- 静态股票池 (已剔除 ANSS/WBA, 加入 SNPS) ---
 STOCK_POOLS = {
     "NASDAQ_100": [
         "AAPL", "MSFT", "AMZN", "NVDA", "META", "GOOGL", "GOOG", "TSLA", "AVGO", "ADBE", 
@@ -408,7 +408,7 @@ def find_pivots(df, window=5):
 
 def identify_patterns(df):
     """
-    无限延长画线 + [新] 突破新鲜度检查
+    无限延长画线 + 3.5% 新鲜度检查
     """
     if len(df) < 30: return None, [], []
     
@@ -454,18 +454,11 @@ def identify_patterns(df):
                     curr_price = df['close'].iloc[-1]
                     res_today = m * curr_idx + c
                     
-                    # 1. 形态收敛 check
                     if m < 0.005 and (lm > m + 0.01):
-                         # 2. 突破 check
                          if curr_price > res_today:
-                             # [新增] 3. 新鲜度 check (Freshness Filter)
-                             # 只有当当前价格距离阻力线 < 3.5% 时，才算刚突破的买点
-                             # 防止 RKLB 这种已经涨飞了的旧形态继续报警
+                             # Freshness Check
                              if curr_price < res_today * 1.035:
                                  pattern_name = "形态突破 (刚启动)"
-                             else:
-                                 # 虽然形态破了，但已经飞了，不作为信号
-                                 pass
     
     return pattern_name, res_line, sup_line
 
@@ -504,26 +497,35 @@ def get_volume_projection_factor(ny_now, minutes_elapsed):
     elif minutes_elapsed <= 60: return 13.0 - (13.0 - 8.0) * (minutes_elapsed - 10) / 50
     else: return 8.0 - (8.0 - 4.0) * (minutes_elapsed - 60) / (TOTAL_MINUTES - 60)
 
-def calculate_structure_stop(df):
-    _, pivots_low = find_pivots(df, window=5)
+# [新增] 计算双线：止损位 (ATR) 和 支撑位 (Structure)
+def calculate_risk_levels(df):
+    """
+    返回 (stop_loss, support)
+    Stop Loss: 2.8x ATR (Hard Risk Control)
+    Support: Pivot Low (Structural Level)
+    """
     curr_close = df['close'].iloc[-1]
     atr = df['ATR'].iloc[-1] if 'ATR' in df.columns else curr_close * 0.05
     
+    # 1. 计算止损 (Stop Loss) - 回归 2.8x ATR
+    stop_loss = curr_close - (2.8 * atr)
+    
+    # 2. 计算支撑 (Support) - 找前低结构
+    _, pivots_low = find_pivots(df, window=5)
+    support = stop_loss # 默认 fallback
+    
     if pivots_low:
         last_pivot_low = pivots_low[-1][1]
+        # 如果前低在现价下方，且不要离得太远(比如跌了50%)，则作为支撑
         if last_pivot_low < curr_close:
-             return last_pivot_low * 0.99 
+             support = last_pivot_low
              
-    return curr_close - (2.8 * atr)
+    return stop_loss, support
 
 # --- 核心信号检查函数 ---
 def check_signals_sync(df):
     if len(df) < 60: return False, 0, "数据不足", [], []
     
-    # [新增] 致命时效性检查 (Zombie Data Guard)
-    # 检查最后一根K线的日期。如果它距离今天超过 4 天 (考虑长周末)，
-    # 说明这只股票可能停牌、退市，或者 API 数据断更。
-    # 这样能自动杀掉 ANSS, WBA 这种退市股，而不需要手动维护列表。
     last_date = df.index[-1].date()
     today_date = datetime.now(MARKET_TIMEZONE).date()
     
@@ -564,6 +566,7 @@ def check_signals_sync(df):
     is_volume_ok = False
     proj_vol_final = curr['volume']
     
+    # 只有盘中检查量能，盘前已被外部循环屏蔽
     if is_open_market:
         if minutes_elapsed < 30:
             is_volume_ok = True 
@@ -576,6 +579,7 @@ def check_signals_sync(df):
             if proj_vol_final >= curr['Vol_MA20'] * CONFIG["filter"]["min_vol_ratio"]:
                 is_volume_ok = True
     else:
+        # 盘后复盘使用
         if curr['volume'] >= curr['Vol_MA20'] * CONFIG["filter"]["min_vol_ratio"]:
             is_volume_ok = True
             
@@ -666,27 +670,33 @@ def check_signals_sync(df):
 async def check_signals(df):
     return await asyncio.to_thread(check_signals_sync, df)
 
-def _generate_chart_sync(df, ticker, res_line=[], sup_line=[], stop_price=None):
+# [修改] 接收 stop_price 和 support_price
+def _generate_chart_sync(df, ticker, res_line=[], sup_line=[], stop_price=None, support_price=None):
     buf = io.BytesIO()
       
     last_close = df['close'].iloc[-1]
     
-    if stop_price is None:
-        last_atr = df['ATR'].iloc[-1] if 'ATR' in df.columns else last_close * 0.05
-        stop_price = last_close - 2.8 * last_atr
+    # 默认值保护
+    if stop_price is None: stop_price = last_close * 0.95
+    if support_price is None: support_price = last_close * 0.90
 
     s = mpf.make_marketcolors(up='r', down='g', inherit=True)
     my_style = mpf.make_mpf_style(base_mpl_style="ggplot", marketcolors=s, gridstyle=":")
     plot_df = df.tail(80)
       
-    stop_line = [stop_price] * len(plot_df)
+    stop_line_data = [stop_price] * len(plot_df)
+    supp_line_data = [support_price] * len(plot_df)
 
     add_plots = [
         mpf.make_addplot(plot_df['Nx_Blue_UP'], color='dodgerblue', width=1.0),
         mpf.make_addplot(plot_df['Nx_Blue_DW'], color='dodgerblue', width=1.0),
         mpf.make_addplot(plot_df['Nx_Yellow_UP'], color='gold', width=1.0),
         mpf.make_addplot(plot_df['Nx_Yellow_DW'], color='gold', width=1.0),
-        mpf.make_addplot(stop_line, color='red', linestyle='--', width=1.2),
+        
+        # [修改] 双线绘制
+        mpf.make_addplot(stop_line_data, color='red', linestyle='--', width=1.2),   # 止损线 (Red)
+        mpf.make_addplot(supp_line_data, color='green', linestyle=':', width=1.2),  # 支撑线 (Green)
+        
         mpf.make_addplot(plot_df['MACD'], panel=2, type='bar', color='dimgray', alpha=0.5, ylabel='MACD'),
         mpf.make_addplot(plot_df['DIF'], panel=2, color='orange'),
         mpf.make_addplot(plot_df['DEA'], panel=2, color='blue'),
@@ -710,8 +720,8 @@ def _generate_chart_sync(df, ticker, res_line=[], sup_line=[], stop_price=None):
         
     return buf
 
-async def generate_chart(df, ticker, res_line=[], sup_line=[], stop_price=None):
-    return await asyncio.to_thread(_generate_chart_sync, df, ticker, res_line, sup_line, stop_price)
+async def generate_chart(df, ticker, res_line=[], sup_line=[], stop_price=None, support_price=None):
+    return await asyncio.to_thread(_generate_chart_sync, df, ticker, res_line, sup_line, stop_price, support_price)
 
 async def update_stats_data():
     if "signal_history" not in settings: return
@@ -763,7 +773,8 @@ def get_level_by_score(score):
     if score >= 70: return CONFIG["SCORE"]["EMOJI"].get(70, "LOW")
     return CONFIG["SCORE"]["EMOJI"].get(60, "TEST") 
 
-def create_alert_embed(ticker, score, price, reason, support, df, filename):
+# [修改] 增加 support 参数，并显示在 Embed 中
+def create_alert_embed(ticker, score, price, reason, stop_loss, support, df, filename):
     level_str = get_level_by_score(score)
     if "RISK" in reason or "FILTER" in reason or "STALE" in reason:
         color = 0x95a5a6 
@@ -801,11 +812,12 @@ def create_alert_embed(ticker, score, price, reason, support, df, filename):
     embed.add_field(name="技术指标", value=indicator_text, inline=True)
     
     risk_per_trade = 10000 * 0.02
-    risk_diff = price - support
+    risk_diff = price - stop_loss # 用止损价计算风险
     shares = int(risk_per_trade / risk_diff) if risk_diff > 0 else 0
     
     risk_text = (
-        f"**止损价:** `${support:.2f}`\n"
+        f"**支撑位:** `${support:.2f}`\n"
+        f"**止损价:** `${stop_loss:.2f}`\n"
         f"**建议仓位:** `{shares} 股`\n"
         f"*(基于 $10k/2% 风险)*"
     )
@@ -844,10 +856,10 @@ class StockBotClient(discord.Client):
         now_et = datetime.now(MARKET_TIMEZONE)
         curr_time, today_str = now_et.time(), now_et.strftime('%Y-%m-%d')
         
-        is_pre = TIME_PRE_MARKET_START <= curr_time < TIME_MARKET_OPEN
+        # [修改] 删除 pre-market 判断，只保留 10:00 后的扫描
         is_open_scan = TIME_MARKET_SCAN_START <= curr_time <= TIME_MARKET_CLOSE
         
-        if not (is_pre or is_open_scan): return
+        if not is_open_scan: return
         
         logging.info(f"[{now_et.strftime('%H:%M')}] Scanning started...")
         users_data = settings.get("users", {})
@@ -885,10 +897,8 @@ class StockBotClient(discord.Client):
             for uid in user_ids:
                 status_key = f"{ticker}-{today_str}"
                 status = users_data[uid]['daily_status'].get(status_key, "NONE")
-                should_alert = False
-                if is_pre and status == "NONE": should_alert = True
-                if is_open_scan and status in ["NONE", "PRE_SENT"]: should_alert = True
-                if should_alert:
+                # 只有 NONE 状态才会发 (即当天第一次)
+                if status == "NONE":
                     users_to_ping.append(uid)
                     all_alerted = False
             
@@ -922,8 +932,8 @@ class StockBotClient(discord.Client):
             if is_triggered:
                 price = df['close'].iloc[-1]
                 
-                # 使用结构性止损
-                stop_loss = calculate_structure_stop(df)
+                # [修改] 计算双线
+                stop_loss, support = calculate_risk_levels(df)
                 
                 alert_obj = {
                     "ticker": ticker,
@@ -931,7 +941,8 @@ class StockBotClient(discord.Client):
                     "priority": score, 
                     "price": price,
                     "reason": reason,
-                    "support": stop_loss,
+                    "support": support,
+                    "stop_loss": stop_loss, # 新增
                     "df": df,
                     "res_line": res_line,
                     "sup_line": sup_line,
@@ -963,19 +974,21 @@ class StockBotClient(discord.Client):
                 
                 for uid in users:
                     status_key = f"{ticker}-{today_str}"
-                    new_status = "PRE_SENT" if is_pre else ("BOTH_SENT" if users_data[uid]['daily_status'].get(status_key) == "PRE_SENT" else "MARKET_SENT")
-                    users_data[uid]['daily_status'][status_key] = new_status
+                    users_data[uid]['daily_status'][status_key] = "MARKET_SENT"
                 
                 mentions = " ".join([f"<@{uid}>" for uid in users])
                 
                 if sent_charts < max_charts:
-                    # [修改] 将计算好的止损价传给画图函数
-                    chart_buf = await generate_chart(alert["df"], ticker, alert["res_line"], alert["sup_line"], alert["support"])
+                    # [修改] 传递双线给画图
+                    chart_buf = await generate_chart(
+                        alert["df"], ticker, alert["res_line"], alert["sup_line"], 
+                        alert["stop_loss"], alert["support"]
+                    )
                     filename = f"{ticker}.png"
                     
                     embed = create_alert_embed(
                         ticker, score, alert['price'], alert['reason'], 
-                        alert['support'], alert['df'], filename
+                        alert['stop_loss'], alert['support'], alert['df'], filename
                     )
                     
                     try:
@@ -1128,15 +1141,19 @@ async def test_command(interaction: discord.Interaction, ticker: str):
     is_triggered, score, reason, r_l, s_l = await check_signals(df)
     
     price = df['close'].iloc[-1]
-    stop_loss = calculate_structure_stop(df)
+    
+    # [修改] 计算双线
+    stop_loss, support = calculate_risk_levels(df)
 
     if not reason: 
         reason = f"无明显信号 (得分: {score})"
     
-    chart_buf = await generate_chart(df, ticker, r_l, s_l, stop_loss)
+    # [修改] 传递双线给画图
+    chart_buf = await generate_chart(df, ticker, r_l, s_l, stop_loss, support)
     filename = f"{ticker}_test.png"
     
-    embed = create_alert_embed(ticker, score, price, reason, stop_loss, df, filename)
+    # [修改] 传递双线给 Embed
+    embed = create_alert_embed(ticker, score, price, reason, stop_loss, support, df, filename)
 
     try:
         f = discord.File(chart_buf, filename=filename)
