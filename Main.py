@@ -78,7 +78,7 @@ CONFIG = {
             "STRONG_ADX": 20,      
             "ADX_ACTIVATION": 20,     # [修改] 提高权重：趋势刚激活
             "HEAVY_VOLUME": 10,    
-            "KDJ_REBOUND": 8,          
+            "KDJ_REBOUND": 8,           
             "MACD_ZERO_CROSS": 10,    # [修改] 略微提高金叉权重
             "CANDLE_PATTERN": 5,
             "MACD_DIVERGE": 10,       # [修改] 提高权重：底背离 (底部信号)
@@ -400,6 +400,32 @@ async def fetch_realtime_quotes(symbols: list):
         tasks_list = [fetch_single_quote(session, sym) for sym in symbols]
         await asyncio.gather(*tasks_list)
     return quotes_map
+
+# [新增] 专门获取大盘指数 (Light Endpoint)
+async def fetch_market_index_data(days=60):
+    now = datetime.now()
+    # 以此前推足够的时间以确保覆盖回测所需的20天后数据
+    from_date = (now - timedelta(days=days + 30)).strftime("%Y-%m-%d")
+    to_date = now.strftime("%Y-%m-%d")
+    
+    # 使用你指定的 URL 格式获取纳指 (^IXIC)
+    url = f"https://financialmodelingprep.com/stable/historical-price-eod/light?symbol=%5EIXIC&from={from_date}&to={to_date}&apikey={FMP_API_KEY}"
+    
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.get(url) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    if data and isinstance(data, list):
+                        df = pd.DataFrame(data)
+                        if 'date' in df.columns and 'price' in df.columns:
+                            df['date'] = pd.to_datetime(df['date'])
+                            # 确保按时间正序排列 (旧->新)，方便 iloc 索引偏移
+                            df = df.set_index('date').sort_index(ascending=True)
+                            return df
+        except Exception as e:
+            logging.error(f"[Market Index Error] {e}")
+    return None
 
 def find_pivots(df, window=5):
     highs = df['high'].values
@@ -898,7 +924,7 @@ class StockBotClient(discord.Client):
             
         await self.tree.sync()
 
-    # [新增] 发送每日回测报告逻辑 (与 stats_command 逻辑保持一致)
+    # [修改] 发送每日回测报告逻辑
     async def send_daily_stats_report(self):
         if not self.alert_channel: return
         
@@ -909,18 +935,21 @@ class StockBotClient(discord.Client):
         history = settings.get("signal_history", {})
         if not history: return
 
-        # 抓取基准 QQQ
-        qqq_data = await fetch_historical_batch(["QQQ"], days=60)
-        qqq_df = qqq_data.get("QQQ")
+        # [修改] 改用新的 fetch_market_index_data 获取 ^IXIC
+        market_df = await fetch_market_index_data(days=80)
 
         def get_market_ret(date_str, offset_days):
-            if qqq_df is None or qqq_df.empty: return None
+            if market_df is None or market_df.empty: return None
             try:
                 target_date = pd.to_datetime(date_str).normalize()
-                idx = qqq_df.index.get_indexer([target_date], method='nearest')[0]
-                if idx + offset_days < len(qqq_df):
-                    p_start = qqq_df.iloc[idx]['close']
-                    p_end = qqq_df.iloc[idx + offset_days]['close']
+                # 找到对应日期在 index 中的位置
+                idx = market_df.index.get_indexer([target_date], method='nearest')[0]
+                
+                # 确保索引没有越界
+                if idx + offset_days < len(market_df):
+                    # [注意] Light API 返回的是 'price' 字段
+                    p_start = market_df.iloc[idx]['price']
+                    p_end = market_df.iloc[idx + offset_days]['price']
                     return ((p_end - p_start) / p_start) * 100
             except: pass
             return None
@@ -936,7 +965,7 @@ class StockBotClient(discord.Client):
             try:
                 sig_date = datetime.strptime(date_str, "%Y-%m-%d").date()
             except: continue
-            if (today - sig_date).days > 20: continue
+            if (today - sig_date).days > 25: continue # 稍微放宽一点范围
             
             tickers_data = history[date_str]
             for ticker, data in tickers_data.items():
@@ -957,7 +986,7 @@ class StockBotClient(discord.Client):
                             stats_agg[k]["c"] += 1
                             if r > 0: stats_agg[k]["w"] += 1
 
-        embed = discord.Embed(title="回测统计", color=0x9b59b6)
+        embed = discord.Embed(title="回测统计 (Benchmark: ^IXIC)", color=0x9b59b6)
         
         # [重点] 恢复核心数据行
         def mk_field(key):
@@ -1239,7 +1268,7 @@ async def watch_import(interaction: discord.Interaction, preset: app_commands.Ch
     save_settings()
     await interaction.followup.send(f"Imported {preset.name} ({len(new_list)} stocks).")
 
-# [修改] 升级版统计命令 (20天去重 + 纳斯达克对比)
+# [修改] 升级版统计命令 (20天去重 + 纳斯达克 ^IXIC 对比)
 @client.tree.command(name="stats", description="View historical signal accuracy (20-day window)")
 async def stats_command(interaction: discord.Interaction):
     await interaction.response.defer()
@@ -1253,25 +1282,24 @@ async def stats_command(interaction: discord.Interaction):
         await interaction.followup.send("No historical data available.")
         return
 
-    # 2. 抓取纳斯达克 (QQQ) 数据作为基准
-    qqq_data = await fetch_historical_batch(["QQQ"], days=60)
-    qqq_df = qqq_data.get("QQQ")
+    # 2. [修改] 抓取纳斯达克 (^IXIC) 数据作为基准
+    market_df = await fetch_market_index_data(days=80)
 
     def get_market_ret(date_str, offset_days):
-        if qqq_df is None or qqq_df.empty: return None
+        if market_df is None or market_df.empty: return None
         try:
             target_date = pd.to_datetime(date_str).normalize()
-            idx = qqq_df.index.get_indexer([target_date], method='nearest')[0]
-            if idx + offset_days < len(qqq_df):
-                p_start = qqq_df.iloc[idx]['close']
-                p_end = qqq_df.iloc[idx + offset_days]['close']
+            idx = market_df.index.get_indexer([target_date], method='nearest')[0]
+            if idx + offset_days < len(market_df):
+                # [注意] 这里使用 price
+                p_start = market_df.iloc[idx]['price']
+                p_end = market_df.iloc[idx + offset_days]['price']
                 return ((p_end - p_start) / p_start) * 100
         except:
             pass
         return None
 
     # 3. 筛选与统计
-    # 增加 10d
     stats_agg = {
         k: {"s_sum": 0.0, "m_sum": 0.0, "c": 0, "w": 0} 
         for k in ["1d", "5d", "10d", "20d"]
@@ -1289,11 +1317,10 @@ async def stats_command(interaction: discord.Interaction):
         except: continue
         
         days_diff = (today - sig_date).days
-        if days_diff > 20: continue
+        if days_diff > 25: continue
         
         tickers_data = history[date_str]
         for ticker, data in tickers_data.items():
-            # [Fix] 手动test不要记录回测 (Filter out 0 score)
             if data.get("score", 0) == 0: continue
 
             if ticker in seen_tickers: continue
@@ -1313,11 +1340,9 @@ async def stats_command(interaction: discord.Interaction):
                         stats_agg[k]["c"] += 1
                         if r > 0: stats_agg[k]["w"] += 1
 
-    # 4. 构建 Embed - [修改] 视觉优化
-    embed = discord.Embed(title="回测统计", color=0x00BFFF)
-    # [删掉] description
+    # 4. 构建 Embed
+    embed = discord.Embed(title="回测统计 (vs ^IXIC)", color=0x00BFFF)
     
-    # [重点] 恢复核心数据行
     def mk_field(key):
         d = stats_agg[key]
         if d["c"] == 0: return "等待数据..."
@@ -1327,7 +1352,6 @@ async def stats_command(interaction: discord.Interaction):
         win_rate = (d["w"] / d["c"]) * 100
         diff = avg_stock - avg_market
         
-        # [修改] 删掉 emoji, 删掉副标题 (次日/一周等)
         return (
             f"个股平均: `{avg_stock:+.2f}%`\n"
             f"纳指同期: `{avg_market:+.2f}%`\n"
@@ -1335,33 +1359,25 @@ async def stats_command(interaction: discord.Interaction):
             f"个股胜率: `{win_rate:.0f}%`"
         )
 
-    # [修改] 增加 10日表现
     embed.add_field(name="1日表现", value=mk_field("1d"), inline=True)
     embed.add_field(name="5日表现", value=mk_field("5d"), inline=True)
     embed.add_field(name="10日表现", value=mk_field("10d"), inline=True)
     embed.add_field(name="20日表现", value=mk_field("20d"), inline=True)
 
-    # [修改] 列表显示详细 1D/5D/10D/20D
     recent_list_str = []
     for date_str, ticker, score, data in valid_signals[:10]:
-        # [修改] 详细情况里的评级去掉 (score)
-        
         r1 = data.get("ret_1d")
         r1_str = f"{r1:+.1f}%" if r1 is not None else "-"
-        
         r5 = data.get("ret_5d")
         r5_str = f"{r5:+.1f}%" if r5 is not None else "-"
-        
         r10 = data.get("ret_10d")
         r10_str = f"{r10:+.1f}%" if r10 is not None else "-"
-        
         r20 = data.get("ret_20d")
         r20_str = f"{r20:+.1f}%" if r20 is not None else "-"
         
         recent_list_str.append(f"`{date_str}` **{ticker}**\n└ 1D:`{r1_str}` 5D:`{r5_str}` 10D:`{r10_str}` 20D:`{r20_str}`")
         
     if recent_list_str:
-        # [修改] 标题改成 "详细情况"
         embed.add_field(name="详细情况", value="\n".join(recent_list_str), inline=False)
     else:
         embed.add_field(name="详细情况", value="无近期信号", inline=False)
