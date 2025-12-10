@@ -392,37 +392,50 @@ def find_pivots(df, window=5):
             
     return pivots_high, pivots_low
 
+# [修改] 无限延长画线的形态识别函数
 def identify_patterns(df):
     """
-    不管是否突破，都返回最近的趋势线供画图使用
+    计算高低点连线，并向左延伸至视野边界，向右延伸至最新价格，
+    形成“无限延长”的视觉效果。
     """
     if len(df) < 30: return None, [], []
     
     pivots_high, pivots_low = find_pivots(df, window=4)
     
-    # [修改] 只要找到两个点，就准备画线，不直接返回空
     res_line, sup_line = [], []
     pattern_name = None
 
+    # 定义画线的视野范围
+    # 画图函数只显示最后 80 根 (tail(80))
+    # 我们把起点定在倒数第 85 根，确保线从屏幕左侧边缘“穿”进来
+    vis_start_idx = max(0, len(df) - 85)
+    curr_idx = len(df) - 1
+    
+    # 终点时间 (当前)
+    t_end = df.index[curr_idx]
+    # 起点时间 (视野左侧)
+    t_start = df.index[vis_start_idx]
+
+    # 1. 计算阻力线 (Res Line) - 连接高点
     if len(pivots_high) >= 2:
         ph1, ph2 = pivots_high[-2], pivots_high[-1]
         x1, y1 = ph1[2], ph1[1]
         x2, y2 = ph2[2], ph2[1]
+        
         if x2 != x1:
+            # 计算直线方程 y = mx + c
             m = (y2 - y1) / (x2 - x1)
             c = y1 - m * x1
-            # 延伸到当前
-            curr_idx = len(df) - 1
-            start_idx = min(x1, x2) # 画长一点
             
-            p_start = m * start_idx + c
+            # 代入视野起点的 x，算出起点的 y
+            p_start = m * vis_start_idx + c
+            # 代入当前的 x，算出当前的 y
             p_end = m * curr_idx + c
             
-            t_start = df.index[start_idx]
-            t_end = df.index[curr_idx]
+            # 生成坐标点: [(时间起点, 价格起点), (时间终点, 价格终点)]
             res_line = [[(t_start, p_start), (t_end, p_end)]]
             
-            # 只有在画线成功时才判断逻辑
+            # 2. 计算支撑线 (Sup Line) - 连接低点
             if len(pivots_low) >= 2:
                 pl1, pl2 = pivots_low[-2], pivots_low[-1]
                 lx1, ly1 = pl1[2], pl1[1]
@@ -432,18 +445,16 @@ def identify_patterns(df):
                     lm = (ly2 - ly1) / (lx2 - lx1)
                     lc = ly1 - lm * lx1
                     
-                    lp_start = lm * min(lx1, lx2) + lc
+                    lp_start = lm * vis_start_idx + lc
                     lp_end = lm * curr_idx + lc
-                    lt_start = df.index[min(lx1, lx2)]
-                    sup_line = [[(lt_start, lp_start), (t_end, lp_end)]]
                     
-                    # 核心突破逻辑判断
-                    # 1. 阻力线向下或走平 (m < 0.005)
-                    # 2. 支撑线向上 (lm > 0) 或 跌幅更缓
-                    # 3. 价格突破阻力线
+                    sup_line = [[(t_start, lp_start), (t_end, lp_end)]]
+                    
+                    # --- 触发逻辑判断 ---
                     curr_price = df['close'].iloc[-1]
                     res_today = m * curr_idx + c
                     
+                    # 阻力线向下或走平 (m < 0.005) 且 支撑线收敛
                     if m < 0.005 and (lm > m + 0.01):
                          if curr_price > res_today:
                              pattern_name = "形态突破 (收敛三角/旗形)"
@@ -485,7 +496,7 @@ def get_volume_projection_factor(ny_now, minutes_elapsed):
     elif minutes_elapsed <= 60: return 13.0 - (13.0 - 8.0) * (minutes_elapsed - 10) / 50
     else: return 8.0 - (8.0 - 4.0) * (minutes_elapsed - 60) / (TOTAL_MINUTES - 60)
 
-# --- 核心信号检查函数 (彻底修复裸分机制) ---
+# --- 核心信号检查函数 (裸分机制) ---
 def check_signals_sync(df):
     if len(df) < 60: return False, 0, "数据不足", [], []
     
@@ -669,7 +680,6 @@ def _generate_chart_sync(df, ticker, res_line=[], sup_line=[]):
       
     all_lines = []
     
-    # [修改] 移除 detect_visual_channel，不再画那个简陋框框线
     # 只画策略传进来的 Pivot 连线
     if res_line: all_lines.extend(res_line)
     if sup_line: all_lines.extend(sup_line)
