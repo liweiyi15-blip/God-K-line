@@ -395,6 +395,8 @@ def find_pivots(df, window=5):
 def identify_patterns(df):
     """
     无限延长画线
+    [修复] 将视野左边界 vis_start_idx 强制修正为 len(df)-80，
+    与 _generate_chart_sync 中的 df.tail(80) 保持一致，避免日期越界报错。
     """
     if len(df) < 30: return None, [], []
     
@@ -403,7 +405,9 @@ def identify_patterns(df):
     res_line, sup_line = [], []
     pattern_name = None
 
-    vis_start_idx = max(0, len(df) - 85)
+    # [核心修复] 必须是 80，不能是 85
+    # 因为 plot_df = df.tail(80)，画线日期必须在 plot_df 的索引范围内
+    vis_start_idx = max(0, len(df) - 80) 
     curr_idx = len(df) - 1
     
     t_end = df.index[curr_idx]
