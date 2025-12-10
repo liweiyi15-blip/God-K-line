@@ -55,7 +55,7 @@ CONFIG = {
         "max_bias_50": 0.45,
         "max_upper_shadow": 0.4,
         "max_day_change": 0.15,
-        "min_vol_ratio": 1.2, # 粗筛门槛
+        "min_vol_ratio": 1.2, 
         "min_bb_squeeze_width": 0.08, 
         "min_adx_for_squeeze": 15
     },
@@ -392,11 +392,9 @@ def find_pivots(df, window=5):
             
     return pivots_high, pivots_low
 
-# [修改] 无限延长画线的形态识别函数
 def identify_patterns(df):
     """
-    计算高低点连线，并向左延伸至视野边界，向右延伸至最新价格，
-    形成“无限延长”的视觉效果。
+    无限延长画线
     """
     if len(df) < 30: return None, [], []
     
@@ -405,37 +403,26 @@ def identify_patterns(df):
     res_line, sup_line = [], []
     pattern_name = None
 
-    # 定义画线的视野范围
-    # 画图函数只显示最后 80 根 (tail(80))
-    # 我们把起点定在倒数第 85 根，确保线从屏幕左侧边缘“穿”进来
     vis_start_idx = max(0, len(df) - 85)
     curr_idx = len(df) - 1
     
-    # 终点时间 (当前)
     t_end = df.index[curr_idx]
-    # 起点时间 (视野左侧)
     t_start = df.index[vis_start_idx]
 
-    # 1. 计算阻力线 (Res Line) - 连接高点
     if len(pivots_high) >= 2:
         ph1, ph2 = pivots_high[-2], pivots_high[-1]
         x1, y1 = ph1[2], ph1[1]
         x2, y2 = ph2[2], ph2[1]
         
         if x2 != x1:
-            # 计算直线方程 y = mx + c
             m = (y2 - y1) / (x2 - x1)
             c = y1 - m * x1
             
-            # 代入视野起点的 x，算出起点的 y
             p_start = m * vis_start_idx + c
-            # 代入当前的 x，算出当前的 y
             p_end = m * curr_idx + c
             
-            # 生成坐标点: [(时间起点, 价格起点), (时间终点, 价格终点)]
             res_line = [[(t_start, p_start), (t_end, p_end)]]
             
-            # 2. 计算支撑线 (Sup Line) - 连接低点
             if len(pivots_low) >= 2:
                 pl1, pl2 = pivots_low[-2], pivots_low[-1]
                 lx1, ly1 = pl1[2], pl1[1]
@@ -450,11 +437,9 @@ def identify_patterns(df):
                     
                     sup_line = [[(t_start, lp_start), (t_end, lp_end)]]
                     
-                    # --- 触发逻辑判断 ---
                     curr_price = df['close'].iloc[-1]
                     res_today = m * curr_idx + c
                     
-                    # 阻力线向下或走平 (m < 0.005) 且 支撑线收敛
                     if m < 0.005 and (lm > m + 0.01):
                          if curr_price > res_today:
                              pattern_name = "形态突破 (收敛三角/旗形)"
@@ -496,6 +481,27 @@ def get_volume_projection_factor(ny_now, minutes_elapsed):
     elif minutes_elapsed <= 60: return 13.0 - (13.0 - 8.0) * (minutes_elapsed - 10) / 50
     else: return 8.0 - (8.0 - 4.0) * (minutes_elapsed - 60) / (TOTAL_MINUTES - 60)
 
+# [新增] 结构性止损计算函数 (方案B)
+def calculate_structure_stop(df):
+    """
+    计算基于结构的止损位：
+    1. 优先使用最近的波谷 (Pivot Low) * 0.99
+    2. 如果找不到或波谷高于现价，降级为 2.8x ATR
+    """
+    _, pivots_low = find_pivots(df, window=5)
+    curr_close = df['close'].iloc[-1]
+    atr = df['ATR'].iloc[-1] if 'ATR' in df.columns else curr_close * 0.05
+    
+    if pivots_low:
+        last_pivot_low = pivots_low[-1][1]
+        # 正常情况：波谷在现价下方
+        if last_pivot_low < curr_close:
+             # 方案B核心：前低下方 1%
+             return last_pivot_low * 0.99 
+             
+    # 兜底方案：宽松的 ATR 止损
+    return curr_close - (2.8 * atr)
+
 # --- 核心信号检查函数 (裸分机制) ---
 def check_signals_sync(df):
     if len(df) < 60: return False, 0, "数据不足", [], []
@@ -505,9 +511,8 @@ def check_signals_sync(df):
     triggers = []
     score = 0
     weights = CONFIG["SCORE"]["WEIGHTS"]
-    violations = [] # 记录所有过滤/风险项，但不提前返回
+    violations = [] 
 
-    # --- 1. 风险检查 (不返回，只记录) ---
     low_60 = df['low'].tail(60).min()
     if curr['close'] > low_60 * CONFIG["filter"]["max_60d_gain"]: 
         violations.append("RISK: 短期涨幅过大")
@@ -527,7 +532,6 @@ def check_signals_sync(df):
     if curr['Upper_Shadow_Ratio'] > CONFIG["filter"]["max_upper_shadow"]:
         violations.append("RISK: 长上影线压力")
 
-    # --- 2. 量比检查 (不返回，只记录) ---
     ny_now = datetime.now(MARKET_TIMEZONE)
     market_open = ny_now.replace(hour=9, minute=30, second=0, microsecond=0)
     minutes_elapsed = (ny_now - market_open).total_seconds() / 60
@@ -538,7 +542,7 @@ def check_signals_sync(df):
     
     if is_open_market:
         if minutes_elapsed < 30:
-            is_volume_ok = True # 豁免
+            is_volume_ok = True 
         else:
             proj_factor = get_volume_projection_factor(ny_now, max(minutes_elapsed, 1))
             trend_modifier = 1 - (min(curr['ADX'], 40) - 20) / 200 
@@ -554,19 +558,14 @@ def check_signals_sync(df):
     if not is_volume_ok:
         violations.append("FILTER: 量能不足 (死鱼股)")
 
-    # [加分项] 高量比
     if proj_vol_final > curr['Vol_MA20'] * 2.0:
         score += weights["HEAVY_VOLUME"]
 
-    # --- 3. 策略打分 (强制执行) ---
-
-    # 策略 0: K线形态
     candle_patterns = detect_candle_patterns(df)
     if candle_patterns:
         triggers.append(f"K线: {', '.join(candle_patterns)}")
         score += weights["CANDLE_PATTERN"]
 
-    # 策略 1: BB Squeeze 
     bb_min_width = CONFIG["filter"]["min_bb_squeeze_width"]
     bb_open_width = bb_min_width * 1.05 
       
@@ -576,7 +575,6 @@ def check_signals_sync(df):
                 triggers.append(f"BB Squeeze: 紧缩结束+开口向上")
                 score += weights["BB_SQUEEZE"]
 
-    # 策略 2: 趋势强度 & Nx
     is_strong_trend = curr['ADX'] > 25 and curr['PDI'] > curr['MDI']
     is_adx_rising = curr['ADX'] > prev['ADX']
     
@@ -598,25 +596,21 @@ def check_signals_sync(df):
         triggers.append("Nx 结构: 蓝梯回踩确认")
         score += weights["GOD_TIER_NX"] 
 
-    # 策略 3: 形态突破 (强制计算，为了获取画线)
     pattern_name, res_line, sup_line = identify_patterns(df)
     if pattern_name:
         triggers.append(pattern_name)
         score += weights["PATTERN_BREAK"]
 
-    # 策略 4: Nx 突破
     if prev['close'] < prev['Nx_Blue_UP'] and curr['close'] > curr['Nx_Blue_UP']:
         if curr['PDI'] > curr['MDI']:
             triggers.append(f"Nx 突破: 站上蓝梯")
             score += weights["NX_BREAKOUT"]
       
-    # 策略 5: MACD
     is_zero_cross = prev['DIF'] < 0 and curr['DIF'] > 0 and curr['DIF'] > curr['DEA']
     if is_zero_cross:
         triggers.append(f"MACD 金叉")
         score += weights["MACD_ZERO_CROSS"]
 
-    # 策略 6: KDJ / 背离
     if prev['J'] < 0 and curr['J'] > 0 and curr['K'] > curr['D']:
         triggers.append(f"KDJ 反击")
         score += weights["KDJ_REBOUND"]
@@ -629,7 +623,6 @@ def check_signals_sync(df):
              triggers.append(f"MACD 底背离")
              score += weights["MACD_DIVERGE"]
 
-    # 策略 7: 抛售
     pinbar_ratio = (curr['close'] - curr['low']) / (curr['high'] - curr['low'] + 1e-9)
     market_cap = df.attrs.get('marketCap', float('inf')) 
       
@@ -639,11 +632,8 @@ def check_signals_sync(df):
                 triggers.append(f"抛售高潮")
                 score += weights["CAPITULATION"]
 
-    # --- 4. 最终判定 ---
-    # 只有当：分数够高 且 没有违规项 时，才触发报警
     is_triggered = (score >= CONFIG["SCORE"]["MIN_ALERT_SCORE"]) and (len(violations) == 0)
     
-    # 构造返回的 Reason 字符串
     final_reason_parts = triggers + violations
     final_reason = "\n".join(final_reason_parts) if final_reason_parts else "无明显信号"
 
@@ -652,12 +642,16 @@ def check_signals_sync(df):
 async def check_signals(df):
     return await asyncio.to_thread(check_signals_sync, df)
 
-def _generate_chart_sync(df, ticker, res_line=[], sup_line=[]):
+# [修改] 增加 stop_price 参数，画图时不再瞎算
+def _generate_chart_sync(df, ticker, res_line=[], sup_line=[], stop_price=None):
     buf = io.BytesIO()
       
     last_close = df['close'].iloc[-1]
-    last_atr = df['ATR'].iloc[-1] if 'ATR' in df.columns else last_close * 0.05
-    stop_price = last_close - 2 * last_atr
+    
+    # 如果没有传 stop_price，则使用默认的宽松 ATR 逻辑
+    if stop_price is None:
+        last_atr = df['ATR'].iloc[-1] if 'ATR' in df.columns else last_close * 0.05
+        stop_price = last_close - 2.8 * last_atr
 
     s = mpf.make_marketcolors(up='r', down='g', inherit=True)
     my_style = mpf.make_mpf_style(base_mpl_style="ggplot", marketcolors=s, gridstyle=":")
@@ -680,7 +674,6 @@ def _generate_chart_sync(df, ticker, res_line=[], sup_line=[]):
       
     all_lines = []
     
-    # 只画策略传进来的 Pivot 连线
     if res_line: all_lines.extend(res_line)
     if sup_line: all_lines.extend(sup_line)
         
@@ -695,8 +688,8 @@ def _generate_chart_sync(df, ticker, res_line=[], sup_line=[]):
         
     return buf
 
-async def generate_chart(df, ticker, res_line=[], sup_line=[]):
-    return await asyncio.to_thread(_generate_chart_sync, df, ticker, res_line, sup_line)
+async def generate_chart(df, ticker, res_line=[], sup_line=[], stop_price=None):
+    return await asyncio.to_thread(_generate_chart_sync, df, ticker, res_line, sup_line, stop_price)
 
 async def update_stats_data():
     if "signal_history" not in settings: return
@@ -750,9 +743,8 @@ def get_level_by_score(score):
 
 def create_alert_embed(ticker, score, price, reason, support, df, filename):
     level_str = get_level_by_score(score)
-    # [修改] 如果有 RISK 或 FILTER，颜色变灰/红
     if "RISK" in reason or "FILTER" in reason:
-        color = 0x95a5a6 # Grey
+        color = 0x95a5a6 
     else:
         color = 0x00ff00 if score >= 80 else 0x3498db
     
@@ -907,8 +899,9 @@ class StockBotClient(discord.Client):
             
             if is_triggered:
                 price = df['close'].iloc[-1]
-                atr_val = df['ATR'].iloc[-1] if 'ATR' in df.columns else (price * 0.05)
-                stop_loss = price - (2 * atr_val)
+                
+                # [修改] 使用结构性止损
+                stop_loss = calculate_structure_stop(df)
                 
                 alert_obj = {
                     "ticker": ticker,
@@ -954,7 +947,8 @@ class StockBotClient(discord.Client):
                 mentions = " ".join([f"<@{uid}>" for uid in users])
                 
                 if sent_charts < max_charts:
-                    chart_buf = await generate_chart(alert["df"], ticker, alert["res_line"], alert["sup_line"])
+                    # [修改] 将计算好的止损价传给画图函数
+                    chart_buf = await generate_chart(alert["df"], ticker, alert["res_line"], alert["sup_line"], alert["support"])
                     filename = f"{ticker}.png"
                     
                     embed = create_alert_embed(
@@ -1112,14 +1106,15 @@ async def test_command(interaction: discord.Interaction, ticker: str):
     is_triggered, score, reason, r_l, s_l = await check_signals(df)
     
     price = df['close'].iloc[-1]
-    atr_val = df['ATR'].iloc[-1] if 'ATR' in df.columns else (price * 0.05)
-    stop_loss = price - (2 * atr_val)
+    
+    # [修改] 使用结构性止损
+    stop_loss = calculate_structure_stop(df)
 
-    # [修改] 始终显示内容，不再为空
     if not reason: 
         reason = f"无明显信号 (得分: {score})"
     
-    chart_buf = await generate_chart(df, ticker, r_l, s_l)
+    # [修改] 传递 stop_loss 给画图函数
+    chart_buf = await generate_chart(df, ticker, r_l, s_l, stop_loss)
     filename = f"{ticker}_test.png"
     
     embed = create_alert_embed(ticker, score, price, reason, stop_loss, df, filename)
