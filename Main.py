@@ -13,6 +13,7 @@ from collections import defaultdict
 import aiohttp
 import io
 import matplotlib
+import random
 
 # [日志配置]
 import logging
@@ -42,7 +43,7 @@ SETTINGS_FILE = "/app/data/settings.json"
 if not os.path.exists("/app/data"):
     SETTINGS_FILE = "settings.json"
 
-# [修改] 删除盘前，只保留盘中扫描时间
+# [配置] 扫描时间
 TIME_MARKET_OPEN = time(9, 30)
 TIME_MARKET_SCAN_START = time(10, 0) # 10点才开始报
 TIME_MARKET_CLOSE = time(16, 0)
@@ -89,7 +90,7 @@ CONFIG = {
     }
 }
 
-# --- 静态股票池 (已剔除 ANSS/WBA, 加入 SNPS) ---
+# --- 静态股票池 ---
 STOCK_POOLS = {
     "NASDAQ_100": [
         "AAPL", "MSFT", "AMZN", "NVDA", "META", "GOOGL", "GOOG", "TSLA", "AVGO", "ADBE", 
@@ -300,6 +301,7 @@ def _safely_process_fmp_data(data, sym):
         logging.error(f"[Data Process Error] {sym}: {e}")
         return None
 
+# [修改] 优化后的历史数据获取：降低并发，增加重试
 async def fetch_historical_batch(symbols: list, days=None):
     if not symbols: return {}
     if days is None: days = CONFIG["system"]["history_days"]
@@ -308,9 +310,10 @@ async def fetch_historical_batch(symbols: list, days=None):
     now = datetime.now()
     from_date = (now - timedelta(days=days + 60)).strftime("%Y-%m-%d") 
     to_date = now.strftime("%Y-%m-%d")
-      
-    connector = aiohttp.TCPConnector(limit=15)
-    semaphore = asyncio.Semaphore(15)
+    
+    # [优化] 限制为 3 并发
+    connector = aiohttp.TCPConnector(limit=3)
+    semaphore = asyncio.Semaphore(3)
       
     headers = {
         "User-Agent": "Mozilla/5.0 (StockBot/1.0)",
@@ -320,59 +323,78 @@ async def fetch_historical_batch(symbols: list, days=None):
     async def fetch_single(session, sym):
         url = f"https://financialmodelingprep.com/stable/historical-price-eod/full?symbol={sym}&from={from_date}&to={to_date}&apikey={FMP_API_KEY}"
         async with semaphore:
-            try:
-                async with session.get(url, ssl=False) as response:
-                    if response.status == 429:
-                        logging.warning(f"[429 Rate Limit] {sym}. Retrying in 5s...")
-                        await asyncio.sleep(5)
-                        response = await session.get(url, ssl=False)
+            retries = 3
+            for i in range(retries):
+                try:
+                    async with session.get(url, ssl=False) as response:
+                        if response.status == 429:
+                            wait_time = 3 * (2 ** i) # 3s, 6s, 12s
+                            logging.warning(f"[429 Rate Limit] {sym}. Retry {i+1}/{retries} in {wait_time}s...")
+                            await asyncio.sleep(wait_time)
+                            continue # 重试
                           
-                    if response.status == 200:
-                        data = await response.json()
-                        df = await asyncio.to_thread(_safely_process_fmp_data, data, sym)
-                          
-                        if df is not None and not df.empty:
-                            results[sym] = df
+                        if response.status == 200:
+                            data = await response.json()
+                            df = await asyncio.to_thread(_safely_process_fmp_data, data, sym)
+                            if df is not None and not df.empty:
+                                results[sym] = df
+                            else:
+                                logging.warning(f"[数据为空] {sym}")
+                            break # 成功退出循环
                         else:
-                            logging.warning(f"[数据为空] {sym}")
-                    else:
-                        logging.error(f"[HTTP 错误] {sym} Status: {response.status}")
-            except Exception as e:
-                logging.error(f"[异常] {sym}: {e}")
+                            logging.error(f"[HTTP 错误] {sym} Status: {response.status}")
+                            break
+                except Exception as e:
+                    logging.error(f"[异常] {sym}: {e}")
+                    break
+            # [优化] 每次请求后稍微停顿，保护 API
+            await asyncio.sleep(0.5)
 
     async with aiohttp.ClientSession(headers=headers, connector=connector) as session:
         tasks_list = [fetch_single(session, sym) for sym in symbols]
         await asyncio.gather(*tasks_list)
     return results
 
+# [修改] 优化后的实时报价获取：降低并发，增加重试
 async def fetch_realtime_quotes(symbols: list):
     if not symbols: return {}
     quotes_map = {}
-    connector = aiohttp.TCPConnector(limit=20)
-    semaphore = asyncio.Semaphore(20)
+    
+    # [优化] 限制为 5 并发
+    connector = aiohttp.TCPConnector(limit=5)
+    semaphore = asyncio.Semaphore(5)
     headers = {"User-Agent": "StockBot/1.0", "Accept": "application/json"}
       
     async def fetch_single_quote(session, sym):
         url = f"https://financialmodelingprep.com/stable/quote?symbol={sym}&apikey={FMP_API_KEY}"
         async with semaphore:
-            try:
-                async with session.get(url, ssl=False) as response:
-                    if response.status == 429:
-                        logging.warning(f"[429 Rate Limit] Quote {sym}. Retrying in 5s...")
-                        await asyncio.sleep(5)
-                        response = await session.get(url, ssl=False)
+            retries = 3
+            for i in range(retries):
+                try:
+                    async with session.get(url, ssl=False) as response:
+                        if response.status == 429:
+                            wait_time = 2 * (2 ** i)
+                            logging.warning(f"[429 Rate Limit] Quote {sym}. Retry {i+1}/{retries} in {wait_time}s...")
+                            await asyncio.sleep(wait_time)
+                            continue
 
-                    if response.status == 200:
-                        data = await response.json()
-                        if isinstance(data, list):
-                            for item in data:
-                                s = item.get('symbol')
-                                if s: quotes_map[s] = item
-                        elif isinstance(data, dict):
-                             s = data.get('symbol')
-                             if s: quotes_map[s] = data
-            except Exception as e:
-                logging.error(f"[Quote Exception] {sym}: {e}")
+                        if response.status == 200:
+                            data = await response.json()
+                            if isinstance(data, list):
+                                for item in data:
+                                    s = item.get('symbol')
+                                    if s: quotes_map[s] = item
+                            elif isinstance(data, dict):
+                                 s = data.get('symbol')
+                                 if s: quotes_map[s] = data
+                            break
+                        else:
+                             logging.error(f"[Quote Error] {sym} Status: {response.status}")
+                             break
+                except Exception as e:
+                    logging.error(f"[Quote Exception] {sym}: {e}")
+                    break
+            await asyncio.sleep(0.2)
 
     async with aiohttp.ClientSession(headers=headers, connector=connector) as session:
         tasks_list = [fetch_single_quote(session, sym) for sym in symbols]
@@ -996,6 +1018,9 @@ class StockBotClient(discord.Client):
             df = df_hist
             if ticker in quotes_map:
                 df = await asyncio.to_thread(merge_and_recalc_sync, df_hist, quotes_map[ticker])
+            
+            # 如果合并失败导致df为空，跳过
+            if df is None or df.empty: continue
 
             user_ids = ticker_user_map[ticker]
             all_alerted = True
