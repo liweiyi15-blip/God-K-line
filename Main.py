@@ -91,8 +91,22 @@ CONFIG = {
 
 # --- 静态股票池 ---
 STOCK_POOLS = {
-    "NASDAQ_100": ["AAPL", "MSFT", "AMZN", "NVDA", "META", "GOOGL", "GOOG", "TSLA", "AVGO", "ADBE", "COST", "PEP", "CSCO", "NFLX", "AMD", "TMUS", "INTC", "CMCSA", "AZN", "QCOM", "TXN", "AMGN", "HON", "INTU", "SBUX", "GILD", "BKNG", "DIOD", "MDLZ", "ISRG", "REGN", "LRCX", "VRTX", "ADP", "ADI", "MELI", "KLAC", "PANW", "SNPS", "CDNS", "CHTR", "MAR", "CSX", "ORLY", "MNST", "NXPI", "CTAS", "FTNT", "WDAY", "DXCM", "PCAR", "KDP", "PAYX", "IDXX", "AEP", "LULU", "EXC", "BIIB", "ADSK", "XEL", "ROST", "MCHP", "CPRT", "DLTR", "EA", "FAST", "CTSH", "VRSK", "CSGP", "ODFL", "EBAY", "ILMN", "GFS", "ALGN", "TEAM", "CDW", "WBD", "SIRI", "ZM", "ENPH", "JD", "PDD", "LCID", "RIVN", "ZS", "DDOG", "CRWD", "TTD", "BKR", "CEG", "GEHC", "ON", "FANG"],
-    "GOD_TIER": ["NVDA", "AMD", "TSM", "SMCI", "AVGO", "ARM", "PLTR", "AI", "PATH", "BABA", "PDD", "BIDU", "NIO", "LI", "XPEV", "COIN", "MARA", "MSTR"]
+    "NASDAQ_100": [
+        "AAPL", "MSFT", "AMZN", "NVDA", "META", "GOOGL", "GOOG", "TSLA", "AVGO", "ADBE", 
+        "COST", "PEP", "CSCO", "NFLX", "AMD", "TMUS", "INTC", "CMCSA", "AZN", "QCOM", 
+        "TXN", "AMGN", "HON", "INTU", "SBUX", "GILD", "BKNG", "DIOD", "MDLZ", "ISRG", 
+        "REGN", "LRCX", "VRTX", "ADP", "ADI", "MELI", "KLAC", "PANW", "SNPS", "CDNS", 
+        "CHTR", "MAR", "CSX", "ORLY", "MNST", "NXPI", "CTAS", "FTNT", "WDAY", "DXCM", 
+        "PCAR", "KDP", "PAYX", "IDXX", "AEP", "LULU", "EXC", "BIIB", "ADSK", "XEL", 
+        "ROST", "MCHP", "CPRT", "DLTR", "EA", "FAST", "CTSH", "VRSK", "CSGP", "ODFL", 
+        "EBAY", "ILMN", "GFS", "ALGN", "TEAM", "CDW", "WBD", "SIRI", "ZM", "ENPH", 
+        "JD", "PDD", "LCID", "RIVN", "ZS", "DDOG", "CRWD", "TTD", "BKR", "CEG", "GEHC", 
+        "ON", "FANG"
+    ],
+    "GOD_TIER": [
+        "NVDA", "AMD", "TSM", "SMCI", "AVGO", "ARM", "PLTR", "AI", "PATH", "BABA", 
+        "PDD", "BIDU", "NIO", "LI", "XPEV", "COIN", "MARA", "MSTR"
+    ]
 }
 
 settings = {}
@@ -394,9 +408,7 @@ def find_pivots(df, window=5):
 
 def identify_patterns(df):
     """
-    无限延长画线
-    [修复] 将视野左边界 vis_start_idx 强制修正为 len(df)-80，
-    与 _generate_chart_sync 中的 df.tail(80) 保持一致，避免日期越界报错。
+    无限延长画线 + [新] 突破新鲜度检查
     """
     if len(df) < 30: return None, [], []
     
@@ -405,8 +417,6 @@ def identify_patterns(df):
     res_line, sup_line = [], []
     pattern_name = None
 
-    # [核心修复] 必须是 80，不能是 85
-    # 因为 plot_df = df.tail(80)，画线日期必须在 plot_df 的索引范围内
     vis_start_idx = max(0, len(df) - 80) 
     curr_idx = len(df) - 1
     
@@ -444,9 +454,18 @@ def identify_patterns(df):
                     curr_price = df['close'].iloc[-1]
                     res_today = m * curr_idx + c
                     
+                    # 1. 形态收敛 check
                     if m < 0.005 and (lm > m + 0.01):
+                         # 2. 突破 check
                          if curr_price > res_today:
-                             pattern_name = "形态突破 (收敛三角/旗形)"
+                             # [新增] 3. 新鲜度 check (Freshness Filter)
+                             # 只有当当前价格距离阻力线 < 3.5% 时，才算刚突破的买点
+                             # 防止 RKLB 这种已经涨飞了的旧形态继续报警
+                             if curr_price < res_today * 1.035:
+                                 pattern_name = "形态突破 (刚启动)"
+                             else:
+                                 # 虽然形态破了，但已经飞了，不作为信号
+                                 pass
     
     return pattern_name, res_line, sup_line
 
@@ -485,31 +504,32 @@ def get_volume_projection_factor(ny_now, minutes_elapsed):
     elif minutes_elapsed <= 60: return 13.0 - (13.0 - 8.0) * (minutes_elapsed - 10) / 50
     else: return 8.0 - (8.0 - 4.0) * (minutes_elapsed - 60) / (TOTAL_MINUTES - 60)
 
-# [新增] 结构性止损计算函数 (方案B)
 def calculate_structure_stop(df):
-    """
-    计算基于结构的止损位：
-    1. 优先使用最近的波谷 (Pivot Low) * 0.99
-    2. 如果找不到或波谷高于现价，降级为 2.8x ATR
-    """
     _, pivots_low = find_pivots(df, window=5)
     curr_close = df['close'].iloc[-1]
     atr = df['ATR'].iloc[-1] if 'ATR' in df.columns else curr_close * 0.05
     
     if pivots_low:
         last_pivot_low = pivots_low[-1][1]
-        # 正常情况：波谷在现价下方
         if last_pivot_low < curr_close:
-             # 方案B核心：前低下方 1%
              return last_pivot_low * 0.99 
              
-    # 兜底方案：宽松的 ATR 止损
     return curr_close - (2.8 * atr)
 
-# --- 核心信号检查函数 (裸分机制) ---
+# --- 核心信号检查函数 ---
 def check_signals_sync(df):
     if len(df) < 60: return False, 0, "数据不足", [], []
     
+    # [新增] 致命时效性检查 (Zombie Data Guard)
+    # 检查最后一根K线的日期。如果它距离今天超过 4 天 (考虑长周末)，
+    # 说明这只股票可能停牌、退市，或者 API 数据断更。
+    # 这样能自动杀掉 ANSS, WBA 这种退市股，而不需要手动维护列表。
+    last_date = df.index[-1].date()
+    today_date = datetime.now(MARKET_TIMEZONE).date()
+    
+    if (today_date - last_date).days > 4:
+        return False, 0, f"DATA_STALE: 数据严重滞后 ({last_date})", [], []
+
     curr = df.iloc[-1]
     prev = df.iloc[-2]
     triggers = []
@@ -646,13 +666,11 @@ def check_signals_sync(df):
 async def check_signals(df):
     return await asyncio.to_thread(check_signals_sync, df)
 
-# [修改] 增加 stop_price 参数，画图时不再瞎算
 def _generate_chart_sync(df, ticker, res_line=[], sup_line=[], stop_price=None):
     buf = io.BytesIO()
       
     last_close = df['close'].iloc[-1]
     
-    # 如果没有传 stop_price，则使用默认的宽松 ATR 逻辑
     if stop_price is None:
         last_atr = df['ATR'].iloc[-1] if 'ATR' in df.columns else last_close * 0.05
         stop_price = last_close - 2.8 * last_atr
@@ -747,7 +765,7 @@ def get_level_by_score(score):
 
 def create_alert_embed(ticker, score, price, reason, support, df, filename):
     level_str = get_level_by_score(score)
-    if "RISK" in reason or "FILTER" in reason:
+    if "RISK" in reason or "FILTER" in reason or "STALE" in reason:
         color = 0x95a5a6 
     else:
         color = 0x00ff00 if score >= 80 else 0x3498db
@@ -904,7 +922,7 @@ class StockBotClient(discord.Client):
             if is_triggered:
                 price = df['close'].iloc[-1]
                 
-                # [修改] 使用结构性止损
+                # 使用结构性止损
                 stop_loss = calculate_structure_stop(df)
                 
                 alert_obj = {
@@ -1110,14 +1128,11 @@ async def test_command(interaction: discord.Interaction, ticker: str):
     is_triggered, score, reason, r_l, s_l = await check_signals(df)
     
     price = df['close'].iloc[-1]
-    
-    # [修改] 使用结构性止损
     stop_loss = calculate_structure_stop(df)
 
     if not reason: 
         reason = f"无明显信号 (得分: {score})"
     
-    # [修改] 传递 stop_loss 给画图函数
     chart_buf = await generate_chart(df, ticker, r_l, s_l, stop_loss)
     filename = f"{ticker}_test.png"
     
