@@ -1029,7 +1029,7 @@ class StockBotClient(discord.Client):
                             p_prev = market_df.iloc[-(days_offset+1)]['price']
                             val = ((p_now - p_prev) / p_prev) * 100
                             avg_market = val
-                            avg_market_str = f"`{val:+.2f}%` (Trend)"
+                            avg_market_str = f"`{val:+.2f}%`"
                         else:
                             avg_market = None
                             avg_market_str = "Wait..."
@@ -1426,7 +1426,7 @@ async def stats_command(interaction: discord.Interaction):
                         p_prev = market_df.iloc[-(days_offset+1)]['price']
                         val = ((p_now - p_prev) / p_prev) * 100
                         avg_market = val
-                        avg_market_str = f"`{val:+.2f}%` (Trend)"
+                        avg_market_str = f"`{val:+.2f}%`"
                     else:
                         avg_market = None
                         avg_market_str = "Wait..."
