@@ -745,6 +745,7 @@ def _generate_chart_sync(df, ticker, res_line=[], sup_line=[], stop_price=None, 
 async def generate_chart(df, ticker, res_line=[], sup_line=[], stop_price=None, support_price=None):
     return await asyncio.to_thread(_generate_chart_sync, df, ticker, res_line, sup_line, stop_price, support_price)
 
+# [修改] 增加 10日 逻辑
 async def update_stats_data():
     if "signal_history" not in settings: return
     updates_made = False
@@ -759,10 +760,14 @@ async def update_stats_data():
         for ticker, data in tickers_data.items():
             need_1d = data.get("ret_1d") is None
             need_5d = data.get("ret_5d") is None and (today - signal_date).days > 5
+            # 新增 10日
+            need_10d = data.get("ret_10d") is None and (today - signal_date).days > 10
             need_20d = data.get("ret_20d") is None and (today - signal_date).days > 20
-            if need_1d or need_5d or need_20d: symbols_to_check.add(ticker)
+            if need_1d or need_5d or need_10d or need_20d: symbols_to_check.add(ticker)
+            
     if not symbols_to_check: return
     data_map = await fetch_historical_batch(list(symbols_to_check), days=60)
+    
     for date_str, tickers_data in history.items():
         signal_date = datetime.strptime(date_str, "%Y-%m-%d").date()
         for ticker, data in tickers_data.items():
@@ -773,14 +778,26 @@ async def update_stats_data():
                 if after_signal.empty: continue
                 signal_price = data['price']
                 if signal_price <= 0: continue
+                
+                # 1D
                 if data.get("ret_1d") is None and len(after_signal) >= 1:
                     price_1d = after_signal.iloc[0]['close']
                     data["ret_1d"] = round(((price_1d - signal_price) / signal_price) * 100, 2)
                     updates_made = True
+                
+                # 5D
                 if data.get("ret_5d") is None and len(after_signal) >= 5:
                     price_5d = after_signal.iloc[4]['close'] 
                     data["ret_5d"] = round(((price_5d - signal_price) / signal_price) * 100, 2)
                     updates_made = True
+                    
+                # 10D
+                if data.get("ret_10d") is None and len(after_signal) >= 10:
+                    price_10d = after_signal.iloc[9]['close'] 
+                    data["ret_10d"] = round(((price_10d - signal_price) / signal_price) * 100, 2)
+                    updates_made = True
+
+                # 20D
                 if data.get("ret_20d") is None and len(after_signal) >= 20:
                     price_20d = after_signal.iloc[19]['close'] 
                     data["ret_20d"] = round(((price_20d - signal_price) / signal_price) * 100, 2)
@@ -881,7 +898,7 @@ class StockBotClient(discord.Client):
             
         await self.tree.sync()
 
-    # [新增] 发送每日回测报告逻辑
+    # [新增] 发送每日回测报告逻辑 (与 stats_command 逻辑保持一致)
     async def send_daily_stats_report(self):
         if not self.alert_channel: return
         
@@ -908,7 +925,8 @@ class StockBotClient(discord.Client):
             except: pass
             return None
 
-        stats_agg = {k: {"s_sum": 0.0, "m_sum": 0.0, "c": 0, "w": 0} for k in ["1d", "5d", "20d"]}
+        # 增加 10d
+        stats_agg = {k: {"s_sum": 0.0, "m_sum": 0.0, "c": 0, "w": 0} for k in ["1d", "5d", "10d", "20d"]}
         seen_tickers = set()
         valid_signals = []
         sorted_dates = sorted(history.keys(), reverse=True)
@@ -922,13 +940,14 @@ class StockBotClient(discord.Client):
             
             tickers_data = history[date_str]
             for ticker, data in tickers_data.items():
+                if data.get("score", 0) == 0: continue # 过滤 TEST
                 if ticker in seen_tickers: continue
                 seen_tickers.add(ticker)
                 
                 score = data.get("score", 0)
                 valid_signals.append((date_str, ticker, score, data))
                 
-                for k, days_off in [("1d", 1), ("5d", 5), ("20d", 20)]:
+                for k, days_off in [("1d", 1), ("5d", 5), ("10d", 10), ("20d", 20)]:
                     r = data.get(f"ret_{k}")
                     if r is not None:
                         m = get_market_ret(date_str, days_off)
@@ -938,31 +957,38 @@ class StockBotClient(discord.Client):
                             stats_agg[k]["c"] += 1
                             if r > 0: stats_agg[k]["w"] += 1
 
-        embed = discord.Embed(title="📊 每日回测简报 (收盘后自动发送)", description="最近20天信号去重统计", color=0x9b59b6)
+        embed = discord.Embed(title="回测统计", color=0x9b59b6)
         
-        def mk_field(key, label):
+        def mk_field(key):
             d = stats_agg[key]
             if d["c"] == 0: return "等待数据..."
             avg_stock = d["s_sum"] / d["c"]
             avg_market = d["m_sum"] / d["c"]
             diff = avg_stock - avg_market
-            icon = "✅" if diff > 0 else "❌"
-            return f"超额收益: **{diff:+.2f}%** {icon}\n个股胜率: `{d['w']/d['c']*100:.0f}%`"
+            return f"个股平均: `{avg_stock:+.2f}%`\n纳指同期: `{avg_market:+.2f}%`\n超额收益: **{diff:+.2f}%**\n个股胜率: `{d['w']/d['c']*100:.0f}%`"
 
-        embed.add_field(name="1日表现", value=mk_field("1d", "次日"), inline=True)
-        embed.add_field(name="5日表现", value=mk_field("5d", "一周"), inline=True)
-        embed.add_field(name="20日表现", value=mk_field("20d", "一月"), inline=True)
+        embed.add_field(name="1日表现", value=mk_field("1d"), inline=True)
+        embed.add_field(name="5日表现", value=mk_field("5d"), inline=True)
+        embed.add_field(name="10日表现", value=mk_field("10d"), inline=True)
+        embed.add_field(name="20日表现", value=mk_field("20d"), inline=True)
         
         recent_list_str = []
         for date_str, ticker, score, data in valid_signals[:5]:
             r1 = data.get("ret_1d")
-            r_str = f"{r1:+.2f}%" if r1 is not None else "Pending"
-            recent_list_str.append(f"`{date_str}` **{ticker}** ({score}) -> 1D: {r_str}")
+            r1_str = f"{r1:+.1f}%" if r1 is not None else "-"
+            r5 = data.get("ret_5d")
+            r5_str = f"{r5:+.1f}%" if r5 is not None else "-"
+            r10 = data.get("ret_10d")
+            r10_str = f"{r10:+.1f}%" if r10 is not None else "-"
+            r20 = data.get("ret_20d")
+            r20_str = f"{r20:+.1f}%" if r20 is not None else "-"
+            
+            recent_list_str.append(f"`{date_str}` **{ticker}**\n└ 1D:`{r1_str}` 5D:`{r5_str}` 10D:`{r10_str}` 20D:`{r20_str}`")
         
         if recent_list_str:
-            embed.add_field(name="最新信号追踪", value="\n".join(recent_list_str), inline=False)
+            embed.add_field(name="详细情况", value="\n".join(recent_list_str), inline=False)
         else:
-            embed.add_field(name="最新信号", value="无近期信号", inline=False)
+            embed.add_field(name="详细情况", value="无近期信号", inline=False)
 
         embed.set_footer(text=f"Report generated at {datetime.now(MARKET_TIMEZONE).strftime('%H:%M:%S')} ET")
         await self.alert_channel.send(embed=embed)
@@ -1100,6 +1126,7 @@ class StockBotClient(discord.Client):
                     "reason": alert["reason"],
                     "ret_1d": current_hist.get("ret_1d"),
                     "ret_5d": current_hist.get("ret_5d"),
+                    "ret_10d": current_hist.get("ret_10d"), # 记录 10d
                     "ret_20d": current_hist.get("ret_20d"),
                 }
                 
@@ -1152,7 +1179,7 @@ async def reset_stats(interaction: discord.Interaction):
     global settings
     settings["signal_history"] = {}
     save_settings()
-    await interaction.response.send_message("✅ Backtest statistics have been reset.", ephemeral=True)
+    await interaction.response.send_message("Statistics reset.", ephemeral=True)
 
 @client.tree.command(name="watch_add", description="Add stocks to watch list (e.g., AAPL, TSLA)")
 @app_commands.describe(codes="Stock Symbols")
@@ -1226,19 +1253,14 @@ async def stats_command(interaction: discord.Interaction):
         return
 
     # 2. 抓取纳斯达克 (QQQ) 数据作为基准
-    # 获取过去60天数据以覆盖20天后的回测
     qqq_data = await fetch_historical_batch(["QQQ"], days=60)
     qqq_df = qqq_data.get("QQQ")
 
     def get_market_ret(date_str, offset_days):
         if qqq_df is None or qqq_df.empty: return None
         try:
-            # 找到信号当日对应的索引
             target_date = pd.to_datetime(date_str).normalize()
-            # method='nearest' 确保非交易日信号也能找到最近的交易日数据
             idx = qqq_df.index.get_indexer([target_date], method='nearest')[0]
-            
-            # 确保有足够的后续数据 (idx + offset_days)
             if idx + offset_days < len(qqq_df):
                 p_start = qqq_df.iloc[idx]['close']
                 p_end = qqq_df.iloc[idx + offset_days]['close']
@@ -1248,17 +1270,15 @@ async def stats_command(interaction: discord.Interaction):
         return None
 
     # 3. 筛选与统计
-    # stats 结构: { "1d": { "stock_sum": 0, "market_sum": 0, "count": 0, "wins": 0 }, ... }
-    periods = [1, 5, 20]
+    # 增加 10d
     stats_agg = {
         k: {"s_sum": 0.0, "m_sum": 0.0, "c": 0, "w": 0} 
-        for k in ["1d", "5d", "20d"]
+        for k in ["1d", "5d", "10d", "20d"]
     }
     
     seen_tickers = set()
     valid_signals = []
     
-    # 按日期倒序 (最新的在前)
     sorted_dates = sorted(history.keys(), reverse=True)
     today = datetime.now().date()
     
@@ -1268,13 +1288,13 @@ async def stats_command(interaction: discord.Interaction):
         except: continue
         
         days_diff = (today - sig_date).days
-        
-        # 规则2: 最近一次报警在20天之外就不显示
         if days_diff > 20: continue
         
         tickers_data = history[date_str]
         for ticker, data in tickers_data.items():
-            # 规则2: 如果是20天同一支股票有多次报警，以最新的时间重新开始计算 (去重)
+            # [Fix] 手动test不要记录回测 (Filter out 0 score)
+            if data.get("score", 0) == 0: continue
+
             if ticker in seen_tickers: continue
             seen_tickers.add(ticker)
             
@@ -1282,75 +1302,67 @@ async def stats_command(interaction: discord.Interaction):
             valid_signals.append((date_str, ticker, score, data))
             
             # 累加统计数据
-            # 1日
-            r1 = data.get("ret_1d")
-            if r1 is not None:
-                m1 = get_market_ret(date_str, 1) # 1个交易日后
-                if m1 is not None:
-                    stats_agg["1d"]["s_sum"] += r1
-                    stats_agg["1d"]["m_sum"] += m1
-                    stats_agg["1d"]["c"] += 1
-                    if r1 > 0: stats_agg["1d"]["w"] += 1
-            
-            # 5日
-            r5 = data.get("ret_5d")
-            if r5 is not None:
-                m5 = get_market_ret(date_str, 5) # 5个交易日后
-                if m5 is not None:
-                    stats_agg["5d"]["s_sum"] += r5
-                    stats_agg["5d"]["m_sum"] += m5
-                    stats_agg["5d"]["c"] += 1
-                    if r5 > 0: stats_agg["5d"]["w"] += 1
-                    
-            # 20日
-            r20 = data.get("ret_20d")
-            if r20 is not None:
-                m20 = get_market_ret(date_str, 20) # 20个交易日后
-                if m20 is not None:
-                    stats_agg["20d"]["s_sum"] += r20
-                    stats_agg["20d"]["m_sum"] += m20
-                    stats_agg["20d"]["c"] += 1
-                    if r20 > 0: stats_agg["20d"]["w"] += 1
+            for k, days_off in [("1d", 1), ("5d", 5), ("10d", 10), ("20d", 20)]:
+                r = data.get(f"ret_{k}")
+                if r is not None:
+                    m = get_market_ret(date_str, days_off) 
+                    if m is not None:
+                        stats_agg[k]["s_sum"] += r
+                        stats_agg[k]["m_sum"] += m
+                        stats_agg[k]["c"] += 1
+                        if r > 0: stats_agg[k]["w"] += 1
 
-    # 4. 构建 Embed
-    embed = discord.Embed(title="📊 20天内回测统计 (跑赢大盘?)", description=f"只统计最近20天内信号 (同一代码取最新)", color=0x00BFFF)
+    # 4. 构建 Embed - [修改] 视觉优化
+    embed = discord.Embed(title="回测统计", color=0x00BFFF)
+    # [删掉] description
     
-    def mk_field(key, label):
+    def mk_field(key):
         d = stats_agg[key]
-        if d["c"] == 0: return f"**{label}**\n等待数据..."
+        if d["c"] == 0: return "等待数据..."
         
         avg_stock = d["s_sum"] / d["c"]
         avg_market = d["m_sum"] / d["c"]
         win_rate = (d["w"] / d["c"]) * 100
-        
         diff = avg_stock - avg_market
-        icon = "✅" if diff > 0 else "❌"
         
+        # [修改] 删掉 emoji, 删掉副标题 (次日/一周等)
         return (
-            f"**{label}**\n"
             f"个股平均: `{avg_stock:+.2f}%`\n"
             f"纳指同期: `{avg_market:+.2f}%`\n"
-            f"超额收益: **{diff:+.2f}%** {icon}\n"
+            f"超额收益: **{diff:+.2f}%**\n"
             f"个股胜率: `{win_rate:.0f}%`"
         )
 
-    embed.add_field(name="1日表现", value=mk_field("1d", "次日"), inline=True)
-    embed.add_field(name="5日表现", value=mk_field("5d", "一周"), inline=True)
-    embed.add_field(name="20日表现", value=mk_field("20d", "一月"), inline=True)
+    # [修改] 增加 10日表现
+    embed.add_field(name="1日表现", value=mk_field("1d"), inline=True)
+    embed.add_field(name="5日表现", value=mk_field("5d"), inline=True)
+    embed.add_field(name="10日表现", value=mk_field("10d"), inline=True)
+    embed.add_field(name="20日表现", value=mk_field("20d"), inline=True)
 
-    # 显示最近的几个信号详情
+    # [修改] 列表显示详细 1D/5D/10D/20D
     recent_list_str = []
-    # valid_signals 已经是按日期倒序排列
     for date_str, ticker, score, data in valid_signals[:10]:
+        # [修改] 详细情况里的评级去掉 (score)
+        
         r1 = data.get("ret_1d")
-        r_str = f"{r1:+.2f}%" if r1 is not None else "Pending"
-        level = get_level_by_score(score)
-        recent_list_str.append(f"`{date_str}` **{ticker}** ({score}) {level} -> 1D: {r_str}")
+        r1_str = f"{r1:+.1f}%" if r1 is not None else "-"
+        
+        r5 = data.get("ret_5d")
+        r5_str = f"{r5:+.1f}%" if r5 is not None else "-"
+        
+        r10 = data.get("ret_10d")
+        r10_str = f"{r10:+.1f}%" if r10 is not None else "-"
+        
+        r20 = data.get("ret_20d")
+        r20_str = f"{r20:+.1f}%" if r20 is not None else "-"
+        
+        recent_list_str.append(f"`{date_str}` **{ticker}**\n└ 1D:`{r1_str}` 5D:`{r5_str}` 10D:`{r10_str}` 20D:`{r20_str}`")
         
     if recent_list_str:
-        embed.add_field(name="最近有效信号 (已去重)", value="\n".join(recent_list_str), inline=False)
+        # [修改] 标题改成 "详细情况"
+        embed.add_field(name="详细情况", value="\n".join(recent_list_str), inline=False)
     else:
-        embed.add_field(name="最近信号", value="20天内无信号", inline=False)
+        embed.add_field(name="详细情况", value="无近期信号", inline=False)
         
     await interaction.followup.send(embed=embed)
 
