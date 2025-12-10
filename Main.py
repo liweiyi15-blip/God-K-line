@@ -51,8 +51,8 @@ TIME_MARKET_CLOSE = time(16, 0)
 # --- 核心策略配置 (优化版：防追高，抓启动) ---
 CONFIG = {
     "filter": {
-        "max_60d_gain": 0.6,      # [修改] 从 3.0 改为 0.6 (只看60天内涨幅<60%的，剔除妖股)
-        "max_rsi": 75,            # [修改] 从 82 改为 75 (RSI太高不追)
+        "max_60d_gain": 0.3,      # [修改] 修正逻辑：最低价 * (1 + 0.3) = 1.3倍
+        "max_rsi": 60,            # [修改] 从 82 改为 60 (RSI太高不追)
         "max_bias_50": 0.20,      # [修改] 从 0.45 改为 0.20 (现价不能偏离MA50超过20%)
         "max_upper_shadow": 0.4,
         "max_day_change": 0.15,
@@ -588,7 +588,8 @@ def check_signals_sync(df):
     violations = [] 
 
     low_60 = df['low'].tail(60).min()
-    if curr['close'] > low_60 * CONFIG["filter"]["max_60d_gain"]: 
+    # [修改 Fix 1] 修复逻辑错误: 应该是 Low * (1 + 0.6) = 1.6倍
+    if curr['close'] > low_60 * (1 + CONFIG["filter"]["max_60d_gain"]): 
         violations.append("RISK: 短期涨幅过大")
         
     prev_close_safe = prev['close'] if prev['close'] > 0 else 1.0
@@ -933,8 +934,7 @@ class StockBotClient(discord.Client):
         load_settings()
         
         history = settings.get("signal_history", {})
-        if not history: return
-
+        
         # [修改] 改用新的 fetch_market_index_data 获取 ^IXIC
         market_df = await fetch_market_index_data(days=80)
 
@@ -954,48 +954,100 @@ class StockBotClient(discord.Client):
             except: pass
             return None
 
-        # 增加 10d
-        stats_agg = {k: {"s_sum": 0.0, "m_sum": 0.0, "c": 0, "w": 0} for k in ["1d", "5d", "10d", "20d"]}
-        seen_tickers = set()
-        valid_signals = []
-        sorted_dates = sorted(history.keys(), reverse=True)
-        today = datetime.now().date()
+        # 初始化统计容器: 分离个股(s)和大盘(m)的统计
+        stats_agg = {k: {"s_sum": 0.0, "s_c": 0, "m_sum": 0.0, "m_c": 0, "w": 0} for k in ["1d", "5d", "10d", "20d"]}
         
-        for date_str in sorted_dates:
-            try:
-                sig_date = datetime.strptime(date_str, "%Y-%m-%d").date()
-            except: continue
-            if (today - sig_date).days > 25: continue # 稍微放宽一点范围
+        valid_signals = []
+        if history:
+            sorted_dates = sorted(history.keys(), reverse=True)
+            today = datetime.now().date()
             
-            tickers_data = history[date_str]
-            for ticker, data in tickers_data.items():
-                if data.get("score", 0) == 0: continue # 过滤 TEST
-                if ticker in seen_tickers: continue
-                seen_tickers.add(ticker)
+            for date_str in sorted_dates:
+                try:
+                    sig_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+                except: continue
+                if (today - sig_date).days > 25: continue # 稍微放宽一点范围
                 
-                score = data.get("score", 0)
-                valid_signals.append((date_str, ticker, score, data))
-                
-                for k, days_off in [("1d", 1), ("5d", 5), ("10d", 10), ("20d", 20)]:
-                    r = data.get(f"ret_{k}")
-                    if r is not None:
+                tickers_data = history[date_str]
+                for ticker, data in tickers_data.items():
+                    if data.get("score", 0) == 0: continue # 过滤 TEST
+                    
+                    score = data.get("score", 0)
+                    valid_signals.append((date_str, ticker, score, data))
+                    
+                    for k, days_off in [("1d", 1), ("5d", 5), ("10d", 10), ("20d", 20)]:
+                        # 1. 计算大盘数据 (无条件，只要有信号日期)
                         m = get_market_ret(date_str, days_off)
                         if m is not None:
-                            stats_agg[k]["s_sum"] += r
                             stats_agg[k]["m_sum"] += m
-                            stats_agg[k]["c"] += 1
+                            stats_agg[k]["m_c"] += 1
+                        
+                        # 2. 计算个股数据
+                        r = data.get(f"ret_{k}")
+                        if r is not None:
+                            stats_agg[k]["s_sum"] += r
+                            stats_agg[k]["s_c"] += 1
                             if r > 0: stats_agg[k]["w"] += 1
+        else:
+            # [Fix 3] 即使没有历史数据，也尝试计算最近的大盘走势作为参考
+            # 这里的逻辑是：如果完全没有历史信号，就拿大盘最近的 1,5,10,20 天前的涨幅填进去
+            if market_df is not None and not market_df.empty:
+                last_idx = -1 # 最近的一天
+                # 倒推模拟数据
+                # 实际上这个场景比较特殊，我们选择直接在 Embed 显示时处理 "等待数据"
+                pass
 
-        embed = discord.Embed(title="回测统计 (Benchmark: ^IXIC)", color=0x9b59b6)
+        # [Fix 2] 删除了标题中的 (vs ^IXIC)
+        embed = discord.Embed(title="回测统计", color=0x9b59b6)
         
         # [重点] 恢复核心数据行
         def mk_field(key):
             d = stats_agg[key]
-            if d["c"] == 0: return "等待数据..."
-            avg_stock = d["s_sum"] / d["c"]
-            avg_market = d["m_sum"] / d["c"]
-            diff = avg_stock - avg_market
-            return f"个股平均: `{avg_stock:+.2f}%`\n纳指同期: `{avg_market:+.2f}%`\n超额收益: **{diff:+.2f}%**\n个股胜率: `{d['w']/d['c']*100:.0f}%`"
+            
+            # 个股部分
+            if d["s_c"] > 0:
+                avg_stock = d["s_sum"] / d["s_c"]
+                avg_stock_str = f"`{avg_stock:+.2f}%`"
+                win_rate = f"`{d['w']/d['s_c']*100:.0f}%`"
+            else:
+                avg_stock = None
+                avg_stock_str = "Wait..."
+                win_rate = "-"
+
+            # 大盘部分 (即使个股没数据，只要有 m_c 也显示)
+            if d["m_c"] > 0:
+                avg_market = d["m_sum"] / d["m_c"]
+                avg_market_str = f"`{avg_market:+.2f}%`"
+            else:
+                # [Fix 3] 如果连信号都没，尝试获取大盘最近走势 (Trailing)
+                if d["s_c"] == 0 and market_df is not None and not market_df.empty:
+                    # 计算大盘 Trailing Return
+                    try:
+                        days_offset = int(key[:-1])
+                        if len(market_df) > days_offset:
+                            p_now = market_df.iloc[-1]['price']
+                            p_prev = market_df.iloc[-(days_offset+1)]['price']
+                            val = ((p_now - p_prev) / p_prev) * 100
+                            avg_market = val
+                            avg_market_str = f"`{val:+.2f}%` (Trend)"
+                        else:
+                            avg_market = None
+                            avg_market_str = "Wait..."
+                    except:
+                        avg_market = None
+                        avg_market_str = "Wait..."
+                else:
+                    avg_market = None
+                    avg_market_str = "Wait..."
+
+            # 超额收益
+            if avg_stock is not None and avg_market is not None and isinstance(avg_market, float):
+                diff = avg_stock - avg_market
+                diff_str = f"**{diff:+.2f}%**"
+            else:
+                diff_str = "-"
+            
+            return f"个股平均: {avg_stock_str}\n纳指同期: {avg_market_str}\n超额收益: {diff_str}\n个股胜率: {win_rate}"
 
         embed.add_field(name="1日表现", value=mk_field("1d"), inline=True)
         embed.add_field(name="5日表现", value=mk_field("5d"), inline=True)
@@ -1278,10 +1330,8 @@ async def stats_command(interaction: discord.Interaction):
     
     load_settings()
     history = settings.get("signal_history", {})
-    if not history:
-        await interaction.followup.send("No historical data available.")
-        return
-
+    # [修改] 即使没有 history 也不直接返回，为了显示大盘 Trailing 数据
+    
     # 2. [修改] 抓取纳斯达克 (^IXIC) 数据作为基准
     market_df = await fetch_market_index_data(days=80)
 
@@ -1300,8 +1350,9 @@ async def stats_command(interaction: discord.Interaction):
         return None
 
     # 3. 筛选与统计
+    # s_sum: stock sum, s_c: stock count, m_sum: market sum, m_c: market count
     stats_agg = {
-        k: {"s_sum": 0.0, "m_sum": 0.0, "c": 0, "w": 0} 
+        k: {"s_sum": 0.0, "s_c": 0, "m_sum": 0.0, "m_c": 0, "w": 0} 
         for k in ["1d", "5d", "10d", "20d"]
     }
     
@@ -1331,32 +1382,73 @@ async def stats_command(interaction: discord.Interaction):
             
             # 累加统计数据
             for k, days_off in [("1d", 1), ("5d", 5), ("10d", 10), ("20d", 20)]:
+                # [Fix 3] 独立累加大盘数据
+                m = get_market_ret(date_str, days_off) 
+                if m is not None:
+                    stats_agg[k]["m_sum"] += m
+                    stats_agg[k]["m_c"] += 1
+
+                # 独立累加个股数据
                 r = data.get(f"ret_{k}")
                 if r is not None:
-                    m = get_market_ret(date_str, days_off) 
-                    if m is not None:
-                        stats_agg[k]["s_sum"] += r
-                        stats_agg[k]["m_sum"] += m
-                        stats_agg[k]["c"] += 1
-                        if r > 0: stats_agg[k]["w"] += 1
+                    stats_agg[k]["s_sum"] += r
+                    stats_agg[k]["s_c"] += 1
+                    if r > 0: stats_agg[k]["w"] += 1
 
     # 4. 构建 Embed
-    embed = discord.Embed(title="回测统计 (vs ^IXIC)", color=0x00BFFF)
+    # [Fix 2] 标题修改
+    embed = discord.Embed(title="回测统计", color=0x00BFFF)
     
     def mk_field(key):
         d = stats_agg[key]
-        if d["c"] == 0: return "等待数据..."
         
-        avg_stock = d["s_sum"] / d["c"]
-        avg_market = d["m_sum"] / d["c"]
-        win_rate = (d["w"] / d["c"]) * 100
-        diff = avg_stock - avg_market
+        # 个股部分
+        if d["s_c"] > 0:
+            avg_stock = d["s_sum"] / d["s_c"]
+            avg_stock_str = f"`{avg_stock:+.2f}%`"
+            win_rate = f"`{d['w']/d['s_c']*100:.0f}%`"
+        else:
+            avg_stock = None
+            avg_stock_str = "Wait..."
+            win_rate = "-"
+
+        # 大盘部分 (只要 m_c > 0 就显示，不用管 s_c)
+        if d["m_c"] > 0:
+            avg_market = d["m_sum"] / d["m_c"]
+            avg_market_str = f"`{avg_market:+.2f}%`"
+        else:
+            # [Fix 3] 无信号时，显示最近的大盘趋势
+            if d["s_c"] == 0 and market_df is not None and not market_df.empty:
+                try:
+                    days_offset = int(key[:-1])
+                    if len(market_df) > days_offset:
+                        p_now = market_df.iloc[-1]['price']
+                        p_prev = market_df.iloc[-(days_offset+1)]['price']
+                        val = ((p_now - p_prev) / p_prev) * 100
+                        avg_market = val
+                        avg_market_str = f"`{val:+.2f}%` (Trend)"
+                    else:
+                        avg_market = None
+                        avg_market_str = "Wait..."
+                except:
+                    avg_market = None
+                    avg_market_str = "Wait..."
+            else:
+                avg_market = None
+                avg_market_str = "Wait..."
+
+        # 超额收益
+        if avg_stock is not None and avg_market is not None and isinstance(avg_market, float):
+            diff = avg_stock - avg_market
+            diff_str = f"**{diff:+.2f}%**"
+        else:
+            diff_str = "-"
         
         return (
-            f"个股平均: `{avg_stock:+.2f}%`\n"
-            f"纳指同期: `{avg_market:+.2f}%`\n"
-            f"超额收益: **{diff:+.2f}%**\n"
-            f"个股胜率: `{win_rate:.0f}%`"
+            f"个股平均: {avg_stock_str}\n"
+            f"纳指同期: {avg_market_str}\n"
+            f"超额收益: {diff_str}\n"
+            f"个股胜率: {win_rate}"
         )
 
     embed.add_field(name="1日表现", value=mk_field("1d"), inline=True)
