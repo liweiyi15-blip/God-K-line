@@ -89,6 +89,7 @@ CONFIG = {
         }
     }
 }
+
 # --- 静态股票池 ---
 STOCK_POOLS = {
     "NASDAQ_100": [
@@ -958,6 +959,7 @@ class StockBotClient(discord.Client):
 
         embed = discord.Embed(title="回测统计", color=0x9b59b6)
         
+        # [重点] 恢复核心数据行
         def mk_field(key):
             d = stats_agg[key]
             if d["c"] == 0: return "等待数据..."
@@ -1315,6 +1317,7 @@ async def stats_command(interaction: discord.Interaction):
     embed = discord.Embed(title="回测统计", color=0x00BFFF)
     # [删掉] description
     
+    # [重点] 恢复核心数据行
     def mk_field(key):
         d = stats_agg[key]
         if d["c"] == 0: return "等待数据..."
