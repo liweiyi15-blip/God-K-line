@@ -48,47 +48,140 @@ TIME_MARKET_OPEN = time(9, 30)
 TIME_MARKET_SCAN_START = time(10, 0) # 10点才开始报
 TIME_MARKET_CLOSE = time(16, 0)
 
-# --- 核心策略配置 (优化版：防追高，抓启动) ---
+# --- 核心策略配置 (优化版：防追高，抓启动，资金验证) ---
 CONFIG = {
     "filter": {
-        "max_60d_gain": 0.3,      # 最低价 * (1 + 0.3) = 1.3倍
-        "max_rsi": 60,            # RSI太高不追
-        "max_bias_50": 0.20,      # 现价不能偏离MA50超过20%
-        "max_upper_shadow": 0.4,  # 上影线比例
-        "max_day_change": 0.15,   # 当日最大涨幅
-        "min_vol_ratio": 1.3,     # 量比阈值
+        # [防追高] 60日涨幅限制
+        # 逻辑：当前收盘价不能超过 (过去60天最低价 * 1.3)。
+        # 作用：剔除那些短期已经涨了30%以上的股票，防止去做别人的接盘侠。
+        "max_60d_gain": 0.3,
+
+        # [防过热] RSI 超买限制
+        # 逻辑：RSI(14) 指标不能超过 60。
+        # 作用：RSI超过60-70通常意味着短线过热，回调风险大。我们只做刚启动的，不做已经热过头的。
+        "max_rsi": 60,
+
+        # [防偏离] 乖离率限制
+        # 逻辑：现价不能比 50日均线 (MA50) 高出 20%。
+        # 作用：股价像橡皮筋，离均线太远会被拉回来。限制这个能避免买在“冲高回落”的前夜。
+        "max_bias_50": 0.20,
+
+        # [防抛压] 上影线限制
+        # 逻辑：上影线长度不能超过 K线总长度的 40%。
+        # 作用：长上影线（避雷针）说明上方卖盘压力巨大，这种票冲上去容易被打下来，要过滤。
+        "max_upper_shadow": 0.4,
+
+        # [防疯牛] 单日涨幅限制
+        # 逻辑：当天涨幅不能超过 15%。
+        # 作用：防止追进已经被爆炒的妖股，风险不可控。
+        "max_day_change": 0.15,
+
+        # [能量门槛] 量比阈值
+        # 逻辑：(预测)成交量 必须是 20日均量 的 1.3倍以上。
+        # 作用：无量不突破。确保当前是有资金关注的，不是散户自娱自乐。
+        "min_vol_ratio": 1.3,
         
-        # [修改] 布林带相关参数
-        "min_bb_squeeze_width": 0.08,    # 挤压阈值 (昨日)
-        "min_bb_expand_width": 0.095,    # [新增] 扩张目标阈值 (今日需变大到此数值)
-        "max_bottom_pos": 0.30,          # [新增] 底部判定阈值 (处于过去60天区间的低位35%以内)
+        # --- [核心] 布林带(BB Squeeze) 相关参数 ---
         
-        "min_adx_for_squeeze": 15        # ADX 阈值
+        # [蓄势条件] 挤压阈值 (昨日)
+        # 逻辑：昨天的布林带带宽 (Width) 必须小于 0.08 (8%)。
+        # 作用：寻找那些长期横盘、波动极小、像压缩弹簧一样的股票。数值越小，盘整越极致。
+        "min_bb_squeeze_width": 0.08,
+
+        # [启动条件] 扩张阈值 (今日)
+        # 逻辑：今天的布林带带宽必须扩大到 0.095 (9.5%) 以上。
+        # 作用：确认“弹簧弹开了”。必须配合上面的 0.08 使用，代表从“极静”转为“启动”。
+        "min_bb_expand_width": 0.095,
+
+        # [位置条件] 底部位置阈值
+        # 逻辑：当前价格处于过去60天价格区间的 30% 分位以下。
+        # 作用：(现价-最低价)/(最高价-最低价) <= 0.3。确保我们是在底部抄底，而不是在半山腰接飞刀。
+        "max_bottom_pos": 0.30,
+        
+        # [趋势潜能] ADX 门槛
+        # 逻辑：ADX 必须大于 15。
+        # 作用：防止选到那种彻底没人玩的“死股”。即使在盘整，内部也要有一定的动能。
+        "min_adx_for_squeeze": 15
     },
+
     "pattern": {
-        "pivot_window": 5         # 枢轴点窗口
+        # [形态识别] 枢轴点窗口
+        # 作用：识别阻力线和支撑线时，往前和往后看 5 天来确定高低点。5 是周线级别的经典参数。
+        "pivot_window": 5
     },
+
     "system": {
+        # [防刷屏] 冷却时间
+        # 作用：一只股票报警后，3天内不再报警。防止同一只票天天响。
         "cooldown_days": 3,
+
+        # [防拥堵] 每次扫描最大发图数
+        # 作用：每次扫描最多发 5 张图，避免Discord频道被刷屏。
         "max_charts_per_scan": 5,
+
+        # [数据源] 获取历史数据长度
+        # 作用：向 API 请求过去 400 天的数据，保证均线计算准确。
         "history_days": 400
     },
+
     "SCORE": { 
+        # [及格线] 最低报警分数
+        # 作用：总分低于 70 分的股票，即使满足过滤条件也不报警。
         "MIN_ALERT_SCORE": 70, 
+
+        # --- [打分权重系统] ---
         "WEIGHTS": {
-            "PATTERN_BREAK": 40,      # 形态突破
-            "NX_BREAKOUT": 35,        # 刚站上蓝梯
-            "GOD_TIER_NX": 20,        # 蓝梯回踩
-            "BB_SQUEEZE": 30,         # [修改] 提高权重到30 (底部挤压启动)
-            "STRONG_ADX": 20,      
-            "ADX_ACTIVATION": 20,     # 趋势刚激活
-            "HEAVY_VOLUME": 10,    
+            # 1. 形态突破 (40分)
+            # 含义：突破了前期画出的阻力线趋势线。最强的买入信号之一。
+            "PATTERN_BREAK": 40,
+
+            # 2. Nx 突破 (35分)
+            # 含义：收盘价站上了 Nx 蓝色均线系统。代表趋势转多。
+            "NX_BREAKOUT": 35,
+
+            # 3. 布林带挤压启动 (30分) [核心策略]
+            # 含义：满足上面的 BB Squeeze 逻辑 (低位+挤压+开口)。这是你目前的主策略。
+            "BB_SQUEEZE": 30,
+
+            # 4. 蓝梯回踩 (20分)
+            # 含义：上涨途中的回调，踩稳了蓝线支撑。属于“上车机会”。
+            "GOD_TIER_NX": 20,
+
+            # 5. 强趋势 ADX (20分)
+            # 含义：ADX>25 且 PDI>MDI。代表正处于主升浪中。
+            "STRONG_ADX": 20,
+            
+            # 6. 趋势激活 (20分)
+            # 含义：ADX 结束盘整，刚刚拐头向上。代表行情刚点火。
+            "ADX_ACTIVATION": 20,
+
+            # 7. OBV 资金验证 (15分) [新加入]
+            # 含义：OBV 处于上升趋势 (大于20日均线) 且近期在流入。用于弥补量比预测的不准。
+            "OBV_TREND_UP": 15,
+
+            # 8. 抛售高潮 (12分)
+            # 含义：跌破布林下轨+巨量+长下影。代表恐慌盘涌出，可能是绝佳的超跌反弹点。
+            "CAPITULATION": 12,
+
+            # 9. 巨量 (10分)
+            # 含义：成交量是均量的2倍以上。
+            "HEAVY_VOLUME": 10,
+
+            # 10. MACD 金叉 / 底背离 (10分)
+            # 含义：经典的指标信号。
+            "MACD_ZERO_CROSS": 10,
+            "MACD_DIVERGE": 10,
+
+            # 11. KDJ 反击 (8分)
+            # 含义：J线触底反弹。
             "KDJ_REBOUND": 8,            
-            "MACD_ZERO_CROSS": 10,    # 金叉
-            "CANDLE_PATTERN": 5,
-            "MACD_DIVERGE": 10,       # 底背离
-            "CAPITULATION": 12      
+
+            # 12. K线形态 (5分)
+            # 含义：出现早晨之星、吞没形态等。作为辅助加分。
+            "CANDLE_PATTERN": 5
         },
+        
+        # [评级标签] 根据分数给出的 Emoji
         "EMOJI": { 
             100: "TOP", 90: "HIGH", 80: "MID", 70: "LOW", 60: "TEST"
         }
@@ -232,6 +325,13 @@ def calculate_nx_indicators(df):
     candle_range = (df['high'] - df['low']).replace(0, 1e-9)
     upper_shadow = np.where(df['close'] >= df['open'], df['high'] - df['close'], df['high'] - df['open'])
     df['Upper_Shadow_Ratio'] = upper_shadow / candle_range
+
+    # 11. [新增] OBV (能量潮)
+    # 计算价格变化方向: 涨=+1, 跌=-1, 平=0
+    obv_sign = np.sign(df['close'].diff()).fillna(0)
+    df['OBV'] = (df['volume'] * obv_sign).cumsum()
+    # 计算 OBV 的 20 日均线，用于判断资金趋势
+    df['OBV_MA20'] = df['OBV'].rolling(window=20).mean()
 
     return df
 
@@ -718,6 +818,14 @@ def check_signals_sync(df):
              triggers.append(f"MACD 底背离")
              score += weights["MACD_DIVERGE"]
 
+    # [新增] OBV 验证信号 (资金流入确认)
+    # 逻辑: 当前OBV高于20日均线(趋势向上) 且 当前OBV高于5天前(近期流入) 且 股价收涨
+    if curr['OBV'] > curr['OBV_MA20']:
+        obv_rising = curr['OBV'] > df['OBV'].iloc[-5] # 近期也是涨的
+        if obv_rising and curr['close'] > curr['open']:
+             triggers.append("资金面: OBV趋势向上 (资金流入)")
+             score += weights["OBV_TREND_UP"]
+
     pinbar_ratio = (curr['close'] - curr['low']) / (curr['high'] - curr['low'] + 1e-9)
     market_cap = df.attrs.get('marketCap', float('inf')) 
       
@@ -887,10 +995,14 @@ def create_alert_embed(ticker, score, price, reason, stop_loss, support, df, fil
         vol_label = "**量比:**"
         vol_ratio = curr['volume'] / df['Vol_MA20'].iloc[-1]
       
+    # [新增] OBV 状态文本
+    obv_status = "流入" if curr['OBV'] > curr['OBV_MA20'] else "流出"
+    
     indicator_text = (
         f"**RSI(14):** `{curr['RSI']:.1f}`\n"
         f"**ADX:** `{curr['ADX']:.1f}`\n"
         f"{vol_label} `{vol_ratio:.1f}x`\n" 
+        f"**OBV:** `{obv_status}`\n"
         f"**MACD:** `{curr['MACD']:.2f}`\n"
         f"**Bias(50):** `{curr['BIAS_50']*100:.1f}%`"
     )
