@@ -974,11 +974,11 @@ def create_alert_embed(ticker, score, price, reason, stop_loss, support, df, fil
     else:
         color = 0x00ff00 if score >= 80 else 0x3498db
       
-    # [修改点] 标题改为 "K线抄底警报"
-    embed = discord.Embed(title=f"{ticker} K线抄底警报 | 得分 {score}", color=color)
+    # [修改点] 标题改为 "🚨TSLA 抄底信号 | 得分 15" 格式
+    embed = discord.Embed(title=f"🚨{ticker} 抄底信号 | 得分 {score}", color=color)
     
-    # [修改点] 删除了现价描述
-    # embed.description = f"**现价:** `${price:.2f}`"
+    # [修改点] 恢复现价
+    embed.description = f"**现价:** `${price:.2f}`"
       
     curr = df.iloc[-1]
       
@@ -1017,12 +1017,13 @@ def create_alert_embed(ticker, score, price, reason, stop_loss, support, df, fil
     )
     embed.add_field(name="\u200b", value=risk_text, inline=True)
       
-    embed.add_field(name="触发详情", value=f"```{reason}```", inline=False)
+    # [修改点] 将“触发详情”标题改为 \u200b (空字符)，隐藏标题但保留内容
+    embed.add_field(name="\u200b", value=f"```{reason}```", inline=False)
       
     embed.set_image(url=f"attachment://{filename}")
     
-    # [修改点] 脚注删除多余文字，只保留时间
-    embed.set_footer(text=f"• {ny_now.strftime('%H:%M:%S')} ET")
+    # [修改点] 完全删除 Footer
+    # embed.set_footer(text=...) 
       
     return embed
 
