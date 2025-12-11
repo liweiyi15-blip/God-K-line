@@ -741,7 +741,8 @@ def check_signals_sync(df):
             is_volume_ok = True
             
     if not is_volume_ok:
-        violations.append("FILTER: 量能不足 (死鱼股)")
+        # [修改] 删除了 (死鱼股)
+        violations.append("FILTER: 量能不足")
 
     if proj_vol_final > curr['Vol_MA20'] * 2.0:
         score += weights["HEAVY_VOLUME"]
@@ -973,9 +974,11 @@ def create_alert_embed(ticker, score, price, reason, stop_loss, support, df, fil
     else:
         color = 0x00ff00 if score >= 80 else 0x3498db
       
-    embed = discord.Embed(title=f"{ticker} 深度分析报告 | 得分 {score}", color=color)
-    # [修改点 3] 删掉评级，只保留现价
-    embed.description = f"**现价:** `${price:.2f}`"
+    # [修改点] 标题改为 "K线抄底警报"
+    embed = discord.Embed(title=f"{ticker} K线抄底警报 | 得分 {score}", color=color)
+    
+    # [修改点] 删除了现价描述
+    # embed.description = f"**现价:** `${price:.2f}`"
       
     curr = df.iloc[-1]
       
@@ -983,49 +986,43 @@ def create_alert_embed(ticker, score, price, reason, stop_loss, support, df, fil
     market_open = ny_now.replace(hour=9, minute=30, second=0, microsecond=0)
     minutes_elapsed = (ny_now - market_open).total_seconds() / 60
       
-    vol_label = "**量比:**"
+    # [修改点] 量比加上 (预估)
+    vol_label = "**量比 (预估):**"
     vol_ratio = 0.0
       
     if 0 < minutes_elapsed < 390:
-        vol_label = "**量比 (预测):**"
         proj_factor = get_volume_projection_factor(ny_now, max(minutes_elapsed, 1))
         projected_vol = curr['volume'] * proj_factor
         vol_ratio = projected_vol / df['Vol_MA20'].iloc[-1]
     else:
-        vol_label = "**量比:**"
         vol_ratio = curr['volume'] / df['Vol_MA20'].iloc[-1]
       
     # [新增] OBV 状态文本
     obv_status = "流入" if curr['OBV'] > curr['OBV_MA20'] else "流出"
     
+    # [修改点] 删除了 MACD，删除了标题（使用 \u200b）
     indicator_text = (
         f"**RSI(14):** `{curr['RSI']:.1f}`\n"
         f"**ADX:** `{curr['ADX']:.1f}`\n"
         f"{vol_label} `{vol_ratio:.1f}x`\n" 
         f"**OBV:** `{obv_status}`\n"
-        f"**MACD:** `{curr['MACD']:.2f}`\n"
         f"**Bias(50):** `{curr['BIAS_50']*100:.1f}%`"
     )
-    embed.add_field(name="技术指标", value=indicator_text, inline=True)
+    embed.add_field(name="\u200b", value=indicator_text, inline=True)
       
-    risk_per_trade = 10000 * 0.02
-    risk_diff = price - stop_loss # 用止损价计算风险
-    shares = int(risk_per_trade / risk_diff) if risk_diff > 0 else 0
-      
-    # [修改点 1] 止损位改到支撑位上面
+    # [修改点] 删除了建议仓位，删除了标题（使用 \u200b）
     risk_text = (
         f"**止损价:** `${stop_loss:.2f}`\n"
         f"**支撑位:** `${support:.2f}`\n"
-        f"**建议仓位:** `{shares} 股`\n"
-        f"*(基于 $10k/2% 风险)*"
     )
-    embed.add_field(name="风险管理", value=risk_text, inline=True)
+    embed.add_field(name="\u200b", value=risk_text, inline=True)
       
     embed.add_field(name="触发详情", value=f"```{reason}```", inline=False)
       
     embed.set_image(url=f"attachment://{filename}")
-    # [修改点 2] 脚注修改
-    embed.set_footer(text=f"神-神级K线分析系统 （智能报警版）• {ny_now.strftime('%H:%M:%S')} ET")
+    
+    # [修改点] 脚注删除多余文字，只保留时间
+    embed.set_footer(text=f"• {ny_now.strftime('%H:%M:%S')} ET")
       
     return embed
 
