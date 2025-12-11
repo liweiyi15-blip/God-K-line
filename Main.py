@@ -61,7 +61,7 @@ CONFIG = {
         # [修改] 布林带相关参数
         "min_bb_squeeze_width": 0.08,    # 挤压阈值 (昨日)
         "min_bb_expand_width": 0.095,    # [新增] 扩张目标阈值 (今日需变大到此数值)
-        "max_bottom_pos": 0.35,          # [新增] 底部判定阈值 (处于过去60天区间的低位35%以内)
+        "max_bottom_pos": 0.30,          # [新增] 底部判定阈值 (处于过去60天区间的低位35%以内)
         
         "min_adx_for_squeeze": 15        # ADX 阈值
     },
