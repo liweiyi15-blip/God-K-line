@@ -51,17 +51,22 @@ TIME_MARKET_CLOSE = time(16, 0)
 # --- 核心策略配置 (优化版：防追高，抓启动) ---
 CONFIG = {
     "filter": {
-        "max_60d_gain": 0.3,      # [修改] 修正逻辑：最低价 * (1 + 0.3) = 1.3倍
-        "max_rsi": 60,            # [修改] 从 82 改为 60 (RSI太高不追)
-        "max_bias_50": 0.20,      # [修改] 从 0.45 改为 0.20 (现价不能偏离MA50超过20%)激进策略可改为 0.30，稳健策略保持 0.20。
-        "max_upper_shadow": 0.4,  # 上影线比例。目的：上影线长度超过实体+下影线总和的 40% 时过滤。剔除抛压过大（如“避雷针”形态）的股票。一般不建议修改，长上影线通常不是好兆头。
-        "max_day_change": 0.15,   #当日最大涨幅。目的：剔除当日已经暴涨超过 15% 的股票。防止去接别人的获利盘。如果你是做 penny stock (仙股)，可以放宽到 0.3；做大盘股 0.15 足够。
-        "min_vol_ratio": 1.3,     #量比阈值。目的：当日（或预测）成交量必须是过去20天均量的 1.3 倍以上。无量不突破，排除“死鱼股”。想要更严格的确认信号，可提高到 1.5 或 2.0。
-        "min_bb_squeeze_width": 0.08,    #布林带挤压宽度。目的：布林带带宽（Width）必须小于 0.08。这意味着股票在近期经历了极度的低波动横盘整理，即将变盘。如果发现搜不到票，可适当放宽至 0.12；越小爆发力越强。
-        "min_adx_for_squeeze": 15        #ADX 阈值。目的：配合布林带挤压使用，要求 ADX 至少有一定数值，确保不是完全的死寂，而是蓄势待发。一般保持默认。
+        "max_60d_gain": 0.3,      # 最低价 * (1 + 0.3) = 1.3倍
+        "max_rsi": 60,            # RSI太高不追
+        "max_bias_50": 0.20,      # 现价不能偏离MA50超过20%
+        "max_upper_shadow": 0.4,  # 上影线比例
+        "max_day_change": 0.15,   # 当日最大涨幅
+        "min_vol_ratio": 1.3,     # 量比阈值
+        
+        # [修改] 布林带相关参数
+        "min_bb_squeeze_width": 0.08,    # 挤压阈值 (昨日)
+        "min_bb_expand_width": 0.095,    # [新增] 扩张目标阈值 (今日需变大到此数值)
+        "max_bottom_pos": 0.35,          # [新增] 底部判定阈值 (处于过去60天区间的低位35%以内)
+        
+        "min_adx_for_squeeze": 15        # ADX 阈值
     },
     "pattern": {
-        "pivot_window": 5         #枢轴点窗口。目的：用于识别支撑/阻力线。寻找高低点时，前后各看 5 天。数值越大：找出的支撑/压力越主要（大级别），但反应慢。数值越小：反应快，但容易画出很多无效的杂乱线条。5 是一个经典的周线级别设置。
+        "pivot_window": 5         # 枢轴点窗口
     },
     "system": {
         "cooldown_days": 3,
@@ -71,18 +76,18 @@ CONFIG = {
     "SCORE": { 
         "MIN_ALERT_SCORE": 70, 
         "WEIGHTS": {
-            "PATTERN_BREAK": 40,      # [修改] 提高权重：形态突破 (刚启动)
-            "NX_BREAKOUT": 35,        # [修改] 提高权重：刚站上蓝梯
-            "GOD_TIER_NX": 20,        # [修改] 降低权重：蓝梯回踩 (这是中继信号)
-            "BB_SQUEEZE": 25,         # [修改] 提高权重：布林带挤压 (变盘前夕)
+            "PATTERN_BREAK": 40,      # 形态突破
+            "NX_BREAKOUT": 35,        # 刚站上蓝梯
+            "GOD_TIER_NX": 20,        # 蓝梯回踩
+            "BB_SQUEEZE": 30,         # [修改] 提高权重到30 (底部挤压启动)
             "STRONG_ADX": 20,      
-            "ADX_ACTIVATION": 20,     # [修改] 提高权重：趋势刚激活
+            "ADX_ACTIVATION": 20,     # 趋势刚激活
             "HEAVY_VOLUME": 10,    
-            "KDJ_REBOUND": 8,           
-            "MACD_ZERO_CROSS": 10,    # [修改] 略微提高金叉权重
+            "KDJ_REBOUND": 8,            
+            "MACD_ZERO_CROSS": 10,    # 金叉
             "CANDLE_PATTERN": 5,
-            "MACD_DIVERGE": 10,       # [修改] 提高权重：底背离 (底部信号)
-            "CAPITULATION": 12        
+            "MACD_DIVERGE": 10,       # 底背离
+            "CAPITULATION": 12      
         },
         "EMOJI": { 
             100: "TOP", 90: "HIGH", 80: "MID", 70: "LOW", 60: "TEST"
@@ -587,7 +592,10 @@ def check_signals_sync(df):
     weights = CONFIG["SCORE"]["WEIGHTS"]
     violations = [] 
 
+    # --- 基础统计数据 (用于位置判断) ---
     low_60 = df['low'].tail(60).min()
+    high_60 = df['high'].tail(60).max()
+    
     # [修改 Fix 1] 修复逻辑错误: 应该是 Low * (1 + 0.6) = 1.6倍
     if curr['close'] > low_60 * (1 + CONFIG["filter"]["max_60d_gain"]): 
         violations.append("RISK: 短期涨幅过大")
@@ -643,14 +651,24 @@ def check_signals_sync(df):
         triggers.append(f"K线: {', '.join(candle_patterns)}")
         score += weights["CANDLE_PATTERN"]
 
+    # [修改重点] BB Squeeze 逻辑修改
     bb_min_width = CONFIG["filter"]["min_bb_squeeze_width"]
-    bb_open_width = bb_min_width * 1.05 
+    bb_target_width = CONFIG["filter"]["min_bb_expand_width"] # 使用新的目标宽度
+    max_pos = CONFIG["filter"]["max_bottom_pos"]
+    
+    # 计算当前价格在过去60天内的相对位置 (0=Lowest, 1=Highest)
+    if high_60 > low_60:
+        price_pos = (curr['close'] - low_60) / (high_60 - low_60)
+    else:
+        price_pos = 0.5
       
+    # 逻辑: 昨日挤压 + 今日变大到达标 + 股票上涨(阳线) + 处于底部
     if prev['BB_Width'] < bb_min_width: 
-        if curr['BB_Width'] > bb_open_width and curr['close'] > curr['BB_Mid']: 
-            if curr['ADX'] > CONFIG["filter"]["min_adx_for_squeeze"] and curr['PDI'] > curr['MDI']:
-                triggers.append(f"BB Squeeze: 紧缩结束+开口向上")
-                score += weights["BB_SQUEEZE"]
+        if curr['BB_Width'] >= bb_target_width: # 宽度变大达到目标
+            if curr['close'] > curr['open']: # 股票是上涨的 (收阳)
+                 if price_pos <= max_pos: # 处于低位
+                    triggers.append(f"BB Squeeze: 低位启动 (宽:{curr['BB_Width']:.3f}, 位:{price_pos:.2f})")
+                    score += weights["BB_SQUEEZE"]
 
     is_strong_trend = curr['ADX'] > 25 and curr['PDI'] > curr['MDI']
     is_adx_rising = curr['ADX'] > prev['ADX']
@@ -743,8 +761,8 @@ def _generate_chart_sync(df, ticker, res_line=[], sup_line=[], stop_price=None, 
         mpf.make_addplot(plot_df['Nx_Yellow_DW'], color='gold', width=1.0),
         
         # [修改] 双线绘制
-        mpf.make_addplot(stop_line_data, color='red', linestyle='--', width=1.2),   # 止损线 (Red)
-        mpf.make_addplot(supp_line_data, color='green', linestyle=':', width=1.2),  # 支撑线 (Green)
+        mpf.make_addplot(stop_line_data, color='red', linestyle='--', width=1.2),    # 止损线 (Red)
+        mpf.make_addplot(supp_line_data, color='green', linestyle=':', width=1.2),   # 支撑线 (Green)
         
         mpf.make_addplot(plot_df['MACD'], panel=2, type='bar', color='dimgray', alpha=0.5, ylabel='MACD'),
         mpf.make_addplot(plot_df['DIF'], panel=2, color='orange'),
