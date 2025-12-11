@@ -57,9 +57,9 @@ CONFIG = {
         "max_60d_gain": 0.3,
 
         # [防过热] RSI 超买限制
-        # 逻辑：RSI(14) 指标不能超过 55。
-        # 作用：RSI超过55-70通常意味着短线过热，回调风险大。我们只做刚启动的，不做已经热过头的。
-        "max_rsi": 55,
+        # 逻辑：RSI(14) 指标不能超过 60。
+        # 作用：RSI超过60-70通常意味着短线过热，回调风险大。我们只做刚启动的，不做已经热过头的。
+        "max_rsi": 60,
 
         # [防偏离] 乖离率限制
         # 逻辑：现价不能比 50日均线 (MA50) 高出 20%。
@@ -72,9 +72,9 @@ CONFIG = {
         "max_upper_shadow": 0.4,
 
         # [防疯牛] 单日涨幅限制
-        # 逻辑：当天涨幅不能超过 7%。
+        # 逻辑：当天涨幅不能超过 15%。
         # 作用：防止追进已经被爆炒的妖股，风险不可控。
-        "max_day_change": 0.7,
+        "max_day_change": 0.15,
 
         # [能量门槛] 量比阈值
         # 逻辑：(预测)成交量 必须是 20日均量 的 1.3倍以上。
@@ -871,13 +871,10 @@ def _generate_chart_sync(df, ticker, res_line=[], sup_line=[], stop_price=None, 
         # [修改] 双线绘制
         mpf.make_addplot(stop_line_data, color='red', linestyle='--', width=1.2),    # 止损线 (Red)
         mpf.make_addplot(supp_line_data, color='green', linestyle=':', width=1.2),   # 支撑线 (Green)
-        
-        mpf.make_addplot(plot_df['MACD'], panel=2, type='bar', color='dimgray', alpha=0.5, ylabel='MACD'),
-        mpf.make_addplot(plot_df['DIF'], panel=2, color='orange'),
-        mpf.make_addplot(plot_df['DEA'], panel=2, color='blue'),
     ]
       
-    kwargs = dict(type='candle', style=my_style, title=f"{ticker} Analysis", ylabel='Price', addplot=add_plots, volume=True, panel_ratios=(6, 2, 2), tight_layout=True, savefig=dict(fname=buf, format='png', bbox_inches='tight', pad_inches=0))
+    # [修改] 移除 volume=True 和 panel_ratios, 不再显示成交量和MACD副图
+    kwargs = dict(type='candle', style=my_style, title=f"{ticker} Analysis", ylabel='Price', addplot=add_plots, volume=False, tight_layout=True, savefig=dict(fname=buf, format='png', bbox_inches='tight', pad_inches=0))
       
     all_lines = []
       
@@ -1008,16 +1005,10 @@ def create_alert_embed(ticker, score, price, reason, stop_loss, support, df, fil
     )
     embed.add_field(name="技术指标", value=indicator_text, inline=True)
       
-    risk_per_trade = 10000 * 0.02
-    risk_diff = price - stop_loss # 用止损价计算风险
-    shares = int(risk_per_trade / risk_diff) if risk_diff > 0 else 0
-      
-    # [修改点 1] 止损位改到支撑位上面
+    # [修改点 1] 止损位改到支撑位上面 (移除建议仓位)
     risk_text = (
         f"**止损价:** `${stop_loss:.2f}`\n"
-        f"**支撑位:** `${support:.2f}`\n"
-        f"**建议仓位:** `{shares} 股`\n"
-        f"*(基于 $10k/2% 风险)*"
+        f"**支撑位:** `${support:.2f}`"
     )
     embed.add_field(name="风险管理", value=risk_text, inline=True)
       
