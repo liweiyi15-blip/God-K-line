@@ -497,12 +497,12 @@ def identify_patterns(df):
                 is_valid_sup = True
                 check_start = lx1 + 1
                 check_end = lx2 - 1
-                if check_end > check_start:
-                    subset_lows = df['low'].iloc[check_start:check_end+1].values
-                    subset_indices = np.arange(check_start, check_end+1)
-                    line_vals = m_sup * subset_indices + c_sup
-                    # [修改] 稍微放宽容错 从 0.97 改为 0.95
-                    if np.any(subset_lows < line_vals * 0.95): is_valid_sup = False
+                # [修改] 不再进行容错检查，只要有连接就画线
+                # if check_end > check_start:
+                #    subset_lows = df['low'].iloc[check_start:check_end+1].values
+                #    subset_indices = np.arange(check_start, check_end+1)
+                #    line_vals = m_sup * subset_indices + c_sup
+                #    if np.any(subset_lows < line_vals * 0.95): is_valid_sup = False
                 if is_valid_sup: best_sup_line = (m_sup, c_sup)
             if best_sup_line:
                 m_sup, c_sup = best_sup_line
@@ -754,11 +754,11 @@ def _generate_chart_sync(df, ticker, res_line=[], sup_line=[], stop_price=None, 
     # [修改] 底部成交量单色
     volume_color = '#3b404e'
     
-    # [修改] edge=背景色， wick=显式颜色 (防止 wick 继承 edge 变成背景色)
+    # [修改] edge/wick 改回 inherit 修复引线消失问题
     my_marketcolors = mpf.make_marketcolors(
         up='#089981', down='#f23645', 
-        edge=premium_bg_color,     # K线和成交量的边缘颜色 = 背景色
-        wick={'up': '#089981', 'down': '#f23645'}, # 显式指定 wick 颜色
+        edge='inherit', # 恢复引线和边框颜色
+        wick='inherit', # 恢复引线颜色
         volume=volume_color, 
         ohlc='inherit'
     )
@@ -775,6 +775,7 @@ def _generate_chart_sync(df, ticker, res_line=[], sup_line=[], stop_price=None, 
             'axes.edgecolor': grid_color,
             'ytick.left': False, 'ytick.right': True,
             'ytick.labelleft': False, 'ytick.labelright': True,
+            'patch.linewidth': 0, # [修改] 强制去除柱状图边框 (比改成背景色更干净)
         }
     )
 
@@ -822,22 +823,22 @@ def _generate_chart_sync(df, ticker, res_line=[], sup_line=[], stop_price=None, 
         fig, axlist = mpf.plot(plot_df, **kwargs)
         ax_main = axlist[0]
         
-        # [新增] 中心大标题 (水印风格)
+        # [修改] 中心大标题透明度 0.05
         ax_main.text(0.5, 0.5, ticker, 
             transform=ax_main.transAxes, 
-            fontsize=60, color='white', alpha=0.1, 
+            fontsize=60, color='white', alpha=0.05, 
             ha='center', va='center', weight='bold', zorder=0)
 
-        # --- 绘制右侧 Volume Profile (透明度 0.1) ---
+        # --- 绘制右侧 Volume Profile (透明度 0.06) ---
         if not valid_df.empty:
             ax_vp = ax_main.twiny()
             max_vol = max(vol_bull.max(), vol_bear.max()) if len(vol_bull) > 0 else 1
             ax_vp.set_xlim(0, max_vol * 4) 
             ax_vp.invert_xaxis() 
             
-            # [修改] alpha=0.1
-            ax_vp.barh(bin_centers, vol_bear, height=bar_height, color='#f23645', alpha=0.1, align='center', zorder=0)
-            ax_vp.barh(bin_centers, vol_bull, height=bar_height, color='#089981', alpha=0.1, align='center', left=vol_bear, zorder=0)
+            # [修改] alpha=0.06
+            ax_vp.barh(bin_centers, vol_bear, height=bar_height, color='#f23645', alpha=0.06, align='center', zorder=0)
+            ax_vp.barh(bin_centers, vol_bull, height=bar_height, color='#089981', alpha=0.06, align='center', left=vol_bear, zorder=0)
             ax_vp.axis('off')
 
         fig.savefig(buf, format='png', bbox_inches='tight', pad_inches=0.1, dpi=150)
