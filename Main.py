@@ -686,7 +686,10 @@ def _generate_chart_sync(df, ticker, res_line=[], sup_line=[], stop_price=None, 
     last_date = plot_df.index[-1]
     future_dates = pd.bdate_range(start=last_date + timedelta(days=1), periods=10) 
     future_df = pd.DataFrame(index=future_dates, columns=plot_df.columns)
-    plot_df = pd.concat([plot_df, future_df])
+    
+    # [修改] 忽略 future warnings
+    with pd.option_context("future.no_silent_downcasting", True):
+        plot_df = pd.concat([plot_df, future_df])
 
     # --- Volume Profile ---
     valid_df = plot_df.dropna(subset=['close', 'volume'])
@@ -748,15 +751,15 @@ def _generate_chart_sync(df, ticker, res_line=[], sup_line=[], stop_price=None, 
     premium_bg_color = '#131722'
     grid_color = '#2a2e39'
     text_color = '#b2b5be'
-    # [修改] 底部成交量单色且无边框
+    # [修改] 底部成交量单色
     volume_color = '#3b404e'
     
-    # [修改] 强制 vcedge 与 volume 颜色一致，消除边框
+    # [修改] edge=背景色， wick=显式颜色 (防止 wick 继承 edge 变成背景色)
     my_marketcolors = mpf.make_marketcolors(
         up='#089981', down='#f23645', 
-        edge='inherit', wick='inherit', 
+        edge=premium_bg_color,     # K线和成交量的边缘颜色 = 背景色
+        wick={'up': '#089981', 'down': '#f23645'}, # 显式指定 wick 颜色
         volume=volume_color, 
-        vcedge={'up':volume_color, 'down':volume_color}, # 强制去除成交量边框
         ohlc='inherit'
     )
     
