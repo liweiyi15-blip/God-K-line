@@ -649,7 +649,8 @@ def detect_candle_patterns(df):
     lower_shadow = min(curr['close'], curr['open']) - curr['low']
     upper_shadow = curr['high'] - max(curr['close'], curr['open'])
     if lower_shadow > 2 * curr_body and upper_shadow < 0.5 * curr_body:
-        patterns.append("Hammer (锤子线)")
+        # [修改] 简化名称
+        patterns.append("锤子线")
 
     return patterns
 
@@ -699,22 +700,27 @@ def check_signals_sync(df):
     high_60 = df['high'].tail(60).max()
     
     if curr['close'] > low_60 * (1 + CONFIG["filter"]["max_60d_gain"]): 
-        violations.append("RISK: 短期涨幅过大")
+        # [修改] 名称统一为 过滤器
+        violations.append("过滤器: 短期涨幅过大")
         
     prev_close_safe = prev['close'] if prev['close'] > 0 else 1.0
     day_gain = (curr['close'] - prev['close']) / prev_close_safe
 
     if abs(day_gain) > CONFIG["filter"]["max_day_change"]: 
-        violations.append("RISK: 单日波动过大")
+        # [修改] 名称统一为 过滤器
+        violations.append("过滤器: 单日波动过大")
         
     if curr['RSI'] > CONFIG["filter"]["max_rsi"]: 
-        violations.append("RISK: RSI严重超买")
+        # [修改] 名称统一为 过滤器
+        violations.append("过滤器: RSI严重超买")
       
     if curr['BIAS_50'] > CONFIG["filter"]["max_bias_50"]:
-        violations.append("RISK: 乖离率过大")
+        # [修改] 名称统一为 过滤器
+        violations.append("过滤器: 乖离率过大")
 
     if curr['Upper_Shadow_Ratio'] > CONFIG["filter"]["max_upper_shadow"]:
-        violations.append("RISK: 长上影线压力")
+        # [修改] 名称统一为 过滤器
+        violations.append("过滤器: 长上影线压力")
 
     ny_now = datetime.now(MARKET_TIMEZONE)
     market_open = ny_now.replace(hour=9, minute=30, second=0, microsecond=0)
@@ -740,7 +746,8 @@ def check_signals_sync(df):
             is_volume_ok = True
             
     if not is_volume_ok:
-        violations.append("FILTER: 量能不足")
+        # [修改] 名称统一为 过滤器
+        violations.append("过滤器: 量能不足")
 
     if proj_vol_final > curr['Vol_MA20'] * 2.0:
         score += weights["HEAVY_VOLUME"]
@@ -979,7 +986,8 @@ def get_level_by_score(score):
 
 def create_alert_embed(ticker, score, price, reason, stop_loss, support, df, filename):
     level_str = get_level_by_score(score)
-    if "RISK" in reason or "FILTER" in reason or "STALE" in reason:
+    # [修改] 检查 "过滤器" 关键字
+    if "过滤器" in reason or "STALE" in reason:
         color = 0x95a5a6 
     else:
         color = 0x00ff00 if score >= 80 else 0x3498db
@@ -1124,6 +1132,7 @@ class StockBotClient(discord.Client):
 
             if d["m_c"] > 0:
                 avg_market = d["m_sum"] / d["m_c"]
+                avg_market_str = f"`{avg_market:+.2f}%`"
             else:
                 if d["s_c"] == 0 and market_df is not None and not market_df.empty:
                     try:
@@ -1133,17 +1142,16 @@ class StockBotClient(discord.Client):
                             p_prev = market_df.iloc[-(days_offset+1)]['price']
                             val = ((p_now - p_prev) / p_prev) * 100
                             avg_market = val
+                            avg_market_str = f"`{val:+.2f}%`"
                         else:
                             avg_market = None
+                            avg_market_str = "Wait..."
                     except:
                         avg_market = None
+                        avg_market_str = "Wait..."
                 else:
                     avg_market = None
-
-            if avg_market is not None and isinstance(avg_market, float):
-                avg_market_str = f"`{avg_market:+.2f}%`"
-            else:
-                avg_market_str = "Wait..."
+                    avg_market_str = "Wait..."
 
             if avg_stock is not None and avg_market is not None and isinstance(avg_market, float):
                 diff = avg_stock - avg_market
@@ -1496,6 +1504,7 @@ async def stats_command(interaction: discord.Interaction):
 
         if d["m_c"] > 0:
             avg_market = d["m_sum"] / d["m_c"]
+            avg_market_str = f"`{avg_market:+.2f}%`"
         else:
             if d["s_c"] == 0 and market_df is not None and not market_df.empty:
                 try:
@@ -1505,12 +1514,16 @@ async def stats_command(interaction: discord.Interaction):
                         p_prev = market_df.iloc[-(days_offset+1)]['price']
                         val = ((p_now - p_prev) / p_prev) * 100
                         avg_market = val
+                        avg_market_str = f"`{val:+.2f}%`"
                     else:
                         avg_market = None
+                        avg_market_str = "Wait..."
                 except:
                     avg_market = None
+                    avg_market_str = "Wait..."
             else:
                 avg_market = None
+                avg_market_str = "Wait..."
         
         if avg_market is not None and isinstance(avg_market, float):
             avg_market_str = f"`{avg_market:+.2f}%`"
