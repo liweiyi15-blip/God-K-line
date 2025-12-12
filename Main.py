@@ -497,12 +497,9 @@ def identify_patterns(df):
                 is_valid_sup = True
                 check_start = lx1 + 1
                 check_end = lx2 - 1
-                # [修改] 不再进行容错检查，只要有连接就画线
+                # [修改] 移除所有校验逻辑，强制显示支撑线
                 # if check_end > check_start:
-                #    subset_lows = df['low'].iloc[check_start:check_end+1].values
-                #    subset_indices = np.arange(check_start, check_end+1)
-                #    line_vals = m_sup * subset_indices + c_sup
-                #    if np.any(subset_lows < line_vals * 0.95): is_valid_sup = False
+                #    ...
                 if is_valid_sup: best_sup_line = (m_sup, c_sup)
             if best_sup_line:
                 m_sup, c_sup = best_sup_line
@@ -813,10 +810,10 @@ def _generate_chart_sync(df, ticker, res_line=[], sup_line=[], stop_price=None, 
     )
       
     if seq_of_points:
-        # [修改] 旗形线细度 0.1
+        # [修改] 旗形线细度 0.1 -> 0.6, 透明度 1.0 -> 0.4, 颜色调整
         kwargs['alines'] = dict(
             alines=seq_of_points,
-            colors='white', linewidths=0.1, linestyle='-', alpha=1.0 
+            colors='#d1d4dc', linewidths=0.6, linestyle='-', alpha=0.4 # Modified here
         )
       
     try:
