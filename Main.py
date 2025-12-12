@@ -159,7 +159,7 @@ CONFIG = {
 
             # 7. 抛售高潮 (CAPITULATION)
             # 含义：量能必须大于均量的多少倍？
-            "capitulation_vol_mult": 2,
+            "capitulation_vol_mult": 1.7,
             # 含义：下影线比例必须大于多少？(0.5 = 下影线占K线一半以上)
             "capitulation_pinbar": 0.5,
             # 含义：市值小于多少才算小盘股容易被操纵？(50亿)
