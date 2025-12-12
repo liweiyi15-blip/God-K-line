@@ -133,7 +133,7 @@ CONFIG = {
         "PARAMS": {
             # 1. 巨量 (HEAVY_VOLUME)
             # 含义：当前成交量是 20日均量 的多少倍才算巨量？
-            "heavy_vol_multiplier": 1.4, 
+            "heavy_vol_multiplier": 1.55, 
 
             # 2. 强趋势 (STRONG_ADX)
             # 含义：ADX 大于多少才算强趋势？
