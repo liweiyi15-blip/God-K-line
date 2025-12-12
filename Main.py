@@ -748,7 +748,30 @@ def _generate_chart_sync(df, ticker, res_line=[], sup_line=[], stop_price=None, 
 
     s = mpf.make_marketcolors(up='r', down='g', inherit=True)
     my_style = mpf.make_mpf_style(base_mpl_style="ggplot", marketcolors=s, gridstyle=":")
-    plot_df = df.tail(80)
+    
+    # [修改] 动态调整画图范围，确保容纳长周期趋势线
+    lookback_days = 80 # 默认至少看80天
+    start_idx = max(0, len(df) - lookback_days)
+    
+    all_lines = (res_line or []) + (sup_line or [])
+    min_line_date = None
+    
+    if all_lines:
+        line_dates = [line[0][0] for line in all_lines]
+        if line_dates:
+            min_line_date = min(line_dates)
+            
+    if min_line_date:
+        # 如果有比默认范围更早的线，从线的起点开始画
+        mask = df.index >= min_line_date
+        if mask.any():
+            line_start_idx = mask.argmax() # 找到第一个满足条件的索引
+            start_idx = min(start_idx, line_start_idx)
+            
+    # 多给一点左侧空间
+    start_idx = max(0, start_idx - 5)
+    
+    plot_df = df.iloc[start_idx:]
       
     stop_line_data = [stop_price] * len(plot_df)
     supp_line_data = [support_price] * len(plot_df)
