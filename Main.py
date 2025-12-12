@@ -574,6 +574,10 @@ def identify_patterns(df):
     vis_start_idx = max(0, len(df) - 250)
     curr_idx = len(df) - 1
     
+    # [修复点] 提前定义时间变量，防止后面 UnboundLocalError
+    t_start = df.index[vis_start_idx]
+    t_end = df.index[curr_idx]
+    
     # --- 1. 阻力线 (Resistance) - 优化版：外包络逻辑 ---
     if pivots_high:
         # 步骤 A: 寻找“锚点” (Anchor)
@@ -635,9 +639,6 @@ def identify_patterns(df):
                 # 延伸线段：从视野起点 到 现在的预测点
                 p_start = m * vis_start_idx + c
                 p_end = m * curr_idx + c
-                
-                t_start = df.index[vis_start_idx]
-                t_end = df.index[curr_idx]
                 
                 res_line = [[(t_start, p_start), (t_end, p_end)]]
                 
@@ -929,28 +930,28 @@ def _generate_chart_sync(df, ticker, res_line=[], sup_line=[], stop_price=None, 
     s = mpf.make_marketcolors(up='r', down='g', inherit=True)
     my_style = mpf.make_mpf_style(base_mpl_style="ggplot", marketcolors=s, gridstyle=":")
       
-    # [修改] 动态调整画图范围，确保容纳长周期趋势线
-    lookback_days = 80 # 默认至少看80天
-    start_idx = max(0, len(df) - lookback_days)
+    # [修改] 动态调整画图范围
+    # 默认回溯天数 (如果没有形态)
+    default_lookback = 80
+    start_idx = max(0, len(df) - default_lookback)
       
     all_lines_for_zoom = (res_line or []) + (sup_line or [])
     min_line_date = None
       
     if all_lines_for_zoom:
-        line_dates = [line[0][0] for line in all_lines_for_zoom]
-        if line_dates:
-            min_line_date = min(line_dates)
+        # 1. 提取所有线的起点日期
+        start_dates = [line[0][0] for line in all_lines_for_zoom]
+        if start_dates:
+            min_line_date = min(start_dates)
             
-    if min_line_date:
-        # 如果有比默认范围更早的线，从线的起点开始画
-        mask = df.index >= min_line_date
-        if mask.any():
-            line_start_idx = mask.argmax() # 找到第一个满足条件的索引
-            start_idx = min(start_idx, line_start_idx)
-            
-    # 多给一点左侧空间
-    start_idx = max(0, start_idx - 5)
-      
+            # 2. 找到该日期在 dataframe 中的索引位置
+            # 使用 mask 查找第一个 >= min_line_date 的索引
+            mask = df.index >= min_line_date
+            if mask.any():
+                first_point_idx = mask.argmax()
+                # 3. 往左推 20 个交易日
+                start_idx = max(0, first_point_idx - 20)
+
     plot_df = df.iloc[start_idx:]
       
     stop_line_data = [stop_price] * len(plot_df)
