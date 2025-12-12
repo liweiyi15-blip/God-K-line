@@ -117,9 +117,9 @@ CONFIG = {
             "divergence_price_tolerance": 1.02,
             "divergence_macd_strength": 0.8,
             "obv_lookback": 5,
-            "capitulation_vol_mult": 2,
-            "capitulation_pinbar": 0.5,
-            "capitulation_mcap": 5_000_000_000
+            "capitulation_vol_mult": 2,      # 抛售高潮量比倍数
+            "capitulation_pinbar": 0.5,      # (可选) 针的比例
+            "capitulation_mcap": 5_000_000_000 # (已移除逻辑限制，仅保留参数)
         },
 
         # [加分项] 分值权重
@@ -809,7 +809,7 @@ def check_signals_sync(df):
     # [修改] 使用配置参数
     adx_activating = (recent_adx_min < params["adx_activation_lower"]) and \
                       (df['ADX'].iloc[-1] > df['ADX'].iloc[-2] > df['ADX'].iloc[-3])
-                      
+                       
     if adx_activating:
         triggers.append(f"趋势激活: 盘整结束 ADX拐头")
         score += weights["ADX_ACTIVATION"]
@@ -863,12 +863,15 @@ def check_signals_sync(df):
     pinbar_ratio = (curr['close'] - curr['low']) / (curr['high'] - curr['low'] + 1e-9)
     market_cap = df.attrs.get('marketCap', float('inf')) 
       
-    if curr['low'] < curr['BB_Low']:
-        # [修改] 使用配置参数
+    # -------------------------------------------------------------------------
+    # [修改优化] 抛售高潮 (Capitulation) 逻辑 - 更新为预估量判断，移除强制市值限制
+    # -------------------------------------------------------------------------
+    if curr['low'] < curr['BB_Low']: 
+        # 使用配置参数: capitulation_vol_mult (2.0)
+        # 只要跌破布林下轨 + 预估全天成交量 > 20日均量 * 2倍，即视为抛售高潮
         if proj_vol_final > curr['Vol_MA20'] * params["capitulation_vol_mult"]:
-            if pinbar_ratio > params["capitulation_pinbar"] and market_cap < params["capitulation_mcap"]:
-                triggers.append(f"抛售高潮")
-                score += weights["CAPITULATION"]
+            triggers.append(f"抛售高潮: 恐慌放量 (量比 {proj_vol_final/curr['Vol_MA20']:.1f}x)")
+            score += weights["CAPITULATION"]
 
     is_triggered = (score >= CONFIG["SCORE"]["MIN_ALERT_SCORE"]) and (len(violations) == 0)
       
@@ -880,48 +883,42 @@ def check_signals_sync(df):
 async def check_signals(df):
     return await asyncio.to_thread(check_signals_sync, df)
 
-# [修改] 增加参数 anchor_idx, 增加裁剪逻辑, 增加右侧留白, 移除副图, 美化样式, 增加布林中轨
+# -----------------------------------------------------------------------------
+# [核心修改] 图表生成函数 - TrendSpider 风格美化版 (深色模式 + 右侧Y轴 + 精细线条)
+# -----------------------------------------------------------------------------
 def _generate_chart_sync(df, ticker, res_line=[], sup_line=[], stop_price=None, support_price=None, anchor_idx=None):
     buf = io.BytesIO()
     
     # --- 1. 数据准备与切片 ---
-    # 默认回溯天数
     default_lookback = 80
     start_idx = max(0, len(df) - default_lookback)
-      
-    # 如果有确切的锚点，优先使用它来定位左边界
+    
+    # 如果有确切的锚点，优先使用它来定位左边界，稍微多留点空间
     if anchor_idx is not None:
-        start_idx = max(0, anchor_idx - 20)
+        start_idx = max(0, anchor_idx - 25) 
 
     plot_df = df.iloc[start_idx:].copy()
     
     # --- 2. 右侧留白逻辑 ---
-    # 生成未来 20 个工作日的时间索引
     last_date = plot_df.index[-1]
-    future_dates = pd.bdate_range(start=last_date + timedelta(days=1), periods=20)
-    
-    # 创建一个全空的 DataFrame 用于占位
+    # 稍微减少留白天数，让图更紧凑
+    future_dates = pd.bdate_range(start=last_date + timedelta(days=1), periods=15) 
     future_df = pd.DataFrame(index=future_dates, columns=plot_df.columns)
-    
-    # 合并数据
     plot_df = pd.concat([plot_df, future_df])
 
     # --- 3. 辅助线数据准备 ---
-    valid_len = len(df.iloc[start_idx:]) 
     total_len = len(plot_df)            
-    
     if stop_price is None: stop_price = df['close'].iloc[-1] * 0.95
     if support_price is None: support_price = df['close'].iloc[-1] * 0.90
     
     stop_line_data = [stop_price] * total_len
     supp_line_data = [support_price] * total_len
 
-    # --- 4. 裁剪趋势线 (修复报错逻辑) ---
+    # --- 4. 裁剪趋势线 ---
     def clip_line_segments(segments):
         new_segments = []
         if not segments: return new_segments
         
-        # 获取图表起始时间戳
         plot_start_date = plot_df.index[0]
         plot_start_ts = plot_start_date.timestamp()
         
@@ -932,77 +929,87 @@ def _generate_chart_sync(df, ticker, res_line=[], sup_line=[], stop_price=None, 
             d1_ts = d1.timestamp()
             d2_ts = d2.timestamp()
             
-            # 如果整条线都在左边界左边，丢弃
             if d2_ts < plot_start_ts:
                 continue
             
-            # 如果线段的起点在左边界左边，需要裁剪
             if d1_ts < plot_start_ts:
                 try:
-                    # 计算斜率 slope = (y2 - y1) / (x2 - x1)
                     if d2_ts - d1_ts == 0: continue
                     slope = (p2 - p1) / (d2_ts - d1_ts)
-                    
-                    # 计算图表左边界处的新价格: y = y1 + slope * (x_new - x1)
                     new_p1 = p1 + slope * (plot_start_ts - d1_ts)
-                    
-                    # 添加裁剪后的新线段
                     new_segments.append([(plot_start_date, new_p1), (d2, p2)])
                 except: 
                     continue
             else:
-                # 起点在范围内，无需裁剪
                 new_segments.append(seg)
         return new_segments
 
     res_line_clipped = clip_line_segments(res_line)
     sup_line_clipped = clip_line_segments(sup_line)
 
-    # --- 5. 配置 addplot (含 Nx结构, Boll三轨, 止损支撑) ---
-    add_plots = [
-        # Nx 结构 (实线)
-        mpf.make_addplot(plot_df['Nx_Blue_UP'], color='dodgerblue', width=1.0),
-        mpf.make_addplot(plot_df['Nx_Blue_DW'], color='dodgerblue', width=1.0),
-        mpf.make_addplot(plot_df['Nx_Yellow_UP'], color='gold', width=1.0),
-        mpf.make_addplot(plot_df['Nx_Yellow_DW'], color='gold', width=1.0),
-        
-        # [新增] 布林带三轨 (淡紫色虚线/点线，不干扰主视线)
-        mpf.make_addplot(plot_df['BB_Up'], color='#9370DB', linestyle='-.', width=0.8, alpha=0.7),
-        # 中轨：使用更轻的点线，辅助判断中枢
-        mpf.make_addplot(plot_df['BB_Mid'], color='#9370DB', linestyle=':', width=0.6, alpha=0.6), 
-        mpf.make_addplot(plot_df['BB_Low'], color='#9370DB', linestyle='-.', width=0.8, alpha=0.7),
-        
-        # 止损/支撑 (延伸到未来)
-        mpf.make_addplot(stop_line_data, color='red', linestyle='--', width=1.0, alpha=0.6), 
-        mpf.make_addplot(supp_line_data, color='green', linestyle=':', width=1.0, alpha=0.6), 
-    ]
+    # =========================================================================
+    # [重点修改] 样式定制 - 实现高级深色模式和右侧Y轴
+    # =========================================================================
     
-    # --- 6. 审美美化 ---
+    # 1. 定义高级深色主题颜色
+    premium_bg_color = '#131722'  # TrendSpider 风格的极深蓝灰背景
+    grid_color = '#2a2e39'        # 非常淡的网格线颜色
+    text_color = '#b2b5be'        # 浅灰色文字
+    
+    # 2. 定制 K 线和成交量颜色 (高对比度)
     my_marketcolors = mpf.make_marketcolors(
-        up='#ff333a',      
-        down='#00b060',    
-        edge={'up': '#ff333a', 'down': '#00b060'}, 
-        wick={'up': '#ff333a', 'down': '#00b060'}, 
-        volume='in'        
+        up='#089981',      # 鲜艳的使得绿
+        down='#f23645',    # 鲜艳的使得红
+        edge='inherit',    # 边缘同色
+        wick='inherit',    # 影线同色
+        volume='in',       # 成交量颜色与 K 线一致
+        ohlc='inherit'
     )
     
+    # 3. 创建自定义样式 (核心)
     my_style = mpf.make_mpf_style(
-        base_mpl_style="seaborn-v0_8-whitegrid", 
+        base_mpl_style="dark_background", # 基于 matplotlib 的深色背景
         marketcolors=my_marketcolors,
-        gridstyle=':',     
-        gridcolor='#e0e0e0', 
+        facecolor=premium_bg_color,       # 设置绘图区背景
+        figcolor=premium_bg_color,        # 设置整个画布背景
+        gridstyle=':',                    # 网格样式改为细点状线
+        gridcolor=grid_color,
         gridaxis='both',
-        facecolor='white', 
-        rc={
-            'font.family': 'sans-serif', 
-            'axes.labelcolor': 'grey',
-            'xtick.labelcolor': 'grey',
-            'ytick.labelcolor': 'grey',
-            'axes.edgecolor': '#f0f0f0' 
+        rc={ # Matplotlib 底层参数配置
+            'font.family': 'sans-serif',
+            'axes.labelcolor': text_color,
+            'xtick.labelcolor': text_color,
+            'ytick.labelcolor': text_color,
+            'axes.edgecolor': grid_color, # 边框颜色
+            
+            # [关键] 将 Y 轴刻度和标签移动到右侧
+            'ytick.left': False, 
+            'ytick.right': True,
+            'ytick.labelleft': False, 
+            'ytick.labelright': True,
         }
     )
 
-    # 准备趋势线
+    # --- 5. 配置 addplot (调整线条粗细和样式) ---
+    # [修改] 将所有线条变细，布林带改为点线
+    add_plots = [
+        # Nx 结构 (变细, 0.8)
+        mpf.make_addplot(plot_df['Nx_Blue_UP'], color='dodgerblue', width=0.8),
+        mpf.make_addplot(plot_df['Nx_Blue_DW'], color='dodgerblue', width=0.8),
+        mpf.make_addplot(plot_df['Nx_Yellow_UP'], color='gold', width=0.8),
+        mpf.make_addplot(plot_df['Nx_Yellow_DW'], color='gold', width=0.8),
+        
+        # 布林带 (改为极细的点线)
+        mpf.make_addplot(plot_df['BB_Up'], color='#9370DB', linestyle=':', width=0.6, alpha=0.6),
+        mpf.make_addplot(plot_df['BB_Mid'], color='#9370DB', linestyle=':', width=0.4, alpha=0.4), 
+        mpf.make_addplot(plot_df['BB_Low'], color='#9370DB', linestyle=':', width=0.6, alpha=0.6),
+        
+        # 止损/支撑 (变细)
+        mpf.make_addplot(stop_line_data, color='red', linestyle='--', width=0.8, alpha=0.7), 
+        mpf.make_addplot(supp_line_data, color='green', linestyle=':', width=0.8, alpha=0.7), 
+    ]
+    
+    # --- 6. 准备形态趋势线 (alines) ---
     seq_of_points = []
     if res_line_clipped:
         for line in res_line_clipped:
@@ -1011,27 +1018,34 @@ def _generate_chart_sync(df, ticker, res_line=[], sup_line=[], stop_price=None, 
         for line in sup_line_clipped:
             seq_of_points.append([(line[0][0], float(line[0][1])), (line[1][0], float(line[1][1]))])
 
+    # --- 7. 绘图参数配置 ---
     kwargs = dict(
         type='candle', 
         style=my_style, 
-        title=dict(title=f"{ticker} Analysis", color='black', fontsize=15),
+        # 标题颜色改为白色，加粗
+        title=dict(title=f"{ticker} Analysis", color='white', fontsize=14, weight='bold'),
         ylabel='', 
         addplot=add_plots, 
-        volume=False, # 关闭成交量
+        volume=True,           # [修改] 打开成交量
+        volume_panel=1,        # 将成交量放在独立的面板（下方）
+        panel_ratios=(3, 1),   # 主图与成交量图的高度比例
         tight_layout=True, 
         datetime_format='%m-%d', 
         xrotation=0, 
         figsize=(10, 6), 
-        savefig=dict(fname=buf, format='png', bbox_inches='tight', pad_inches=0.1, dpi=120)
+        # [关键] 调整边距，确保右侧Y轴文字不被切掉
+        savefig=dict(fname=buf, format='png', bbox_inches='tight', pad_inches=0.1, dpi=150),
+        scale_padding={'right': 1.5} # 向右侧增加额外的 padding 给 Y 轴标签
     )
       
+    # [修改] 调整形态线的样式：改为亮白色，并显著变细
     if seq_of_points:
         kwargs['alines'] = dict(
             alines=seq_of_points,
-            colors='gray', 
-            linestyle='--', 
-            linewidths=1.2,
-            alpha=0.6
+            colors='white',      # 纯白色，高亮显示
+            linestyle='-',       # 实线
+            linewidths=0.7,      # 变得很细
+            alpha=0.9
         )
       
     try:
