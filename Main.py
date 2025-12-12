@@ -48,69 +48,57 @@ TIME_MARKET_OPEN = time(9, 30)
 TIME_MARKET_SCAN_START = time(10, 0) # 10点才开始报
 TIME_MARKET_CLOSE = time(16, 0)
 
-# --- 核心策略配置 (已添加注释) ---
+# --- 核心策略配置 ---
 CONFIG = {
-    # [1] 过滤器：如果股票触发这些条件，直接忽略 (一票否决)
     "filter": {
-        "max_60d_gain": 0.3,          # [防追高] 过去60天涨幅超过 30% 则不看
-        "max_rsi": 60,                # [防过热] RSI(14) 超过 60 则不看 (只做底部)
-        "max_bias_50": 0.20,          # [防回落] 现价偏离 50日均线 20% 以上不看
-        "max_upper_shadow": 0.4,      # [防抛压] 上影线长度占整根K线 40% 以上不看
-        "max_day_change": 0.7,        # [防妖股] 单日涨跌幅超过 70% 不看 (数据异常或妖股)
-        "min_vol_ratio": 1.15,        # [资金门槛] 当前成交量必须 > 20日均量的 1.15倍
-        "min_bb_squeeze_width": 0.08, # [布林带] 之前盘整时的带宽最小值
-        "min_bb_expand_width": 0.095, # [布林带] 现在开口的带宽最小值
-        "max_bottom_pos": 0.30,       # [位置] 价格必须处于过去60天波动区间的底部 30% 区域
-        "min_adx_for_squeeze": 15     # [趋势] ADX 至少要 15 (哪怕是弱趋势)
+        "max_60d_gain": 0.3,
+        "max_rsi": 60,
+        "max_bias_50": 0.20,
+        "max_upper_shadow": 0.4,
+        "max_day_change": 0.7,
+        "min_vol_ratio": 1.15,
+        "min_bb_squeeze_width": 0.08,
+        "min_bb_expand_width": 0.095,
+        "max_bottom_pos": 0.30,
+        "min_adx_for_squeeze": 15
     },
-
-    # [2] 形态识别
     "pattern": {
-        "pivot_window": 10            # [关键点] 识别高低点时，左右各看 10 根 K 线
+        "pivot_window": 10
     },
-
-    # [3] 系统设置
     "system": {
-        "cooldown_days": 3,           # [防刷屏] 同一只股票报警后，3天内不再报警
-        "max_charts_per_scan": 5,     # [防拥堵] 每次扫描最多发送 5 张图表
-        "history_days": 300           # [数据源] 获取过去 300 天的历史数据
+        "cooldown_days": 3,
+        "max_charts_per_scan": 5,
+        "history_days": 300
     },
-
-    # [4] 打分系统：满足条件加分，分数越高信号越强
     "SCORE": { 
-        "MIN_ALERT_SCORE": 70,        # [及格线] 总分 >= 70 才报警
-        
-        # 具体的参数阈值
+        "MIN_ALERT_SCORE": 70, 
         "PARAMS": {
-            "heavy_vol_multiplier": 1.55,   # [巨量] 量比 > 1.55 倍算巨量
-            "adx_strong_threshold": 25,     # [强趋势] ADX > 25 算强趋势
-            "adx_activation_lower": 20,     # [趋势激活] ADX 从 20 以下拐头向上
-            "kdj_j_oversold": 0,            # [超卖] KDJ 的 J 值小于 0
-            "divergence_price_tolerance": 1.02, # [背离] 价格创新低容差
-            "divergence_macd_strength": 0.8,    # [背离] MACD 强度系数
-            "obv_lookback": 5,              # [资金] OBV 回溯 5 天看趋势
-            "capitulation_vol_mult": 2,     # [抛售高潮] 量比 > 2 倍算恐慌抛售
-            "capitulation_pinbar": 0.5,     # [金针探底] 下影线占比 > 0.5
-            "capitulation_mcap": 5_000_000_000 # (未使用)
+            "heavy_vol_multiplier": 1.55, 
+            "adx_strong_threshold": 25,
+            "adx_activation_lower": 20,
+            "kdj_j_oversold": 0,
+            "divergence_price_tolerance": 1.02,
+            "divergence_macd_strength": 0.8,
+            "obv_lookback": 5,
+            "capitulation_vol_mult": 2,      
+            "capitulation_pinbar": 0.5,      
+            "capitulation_mcap": 5_000_000_000 
         },
-
-        # 每个信号对应的分值
         "WEIGHTS": {
-            "PATTERN_BREAK": 40,   # 形态突破 (最重要)
-            "NX_BREAKOUT": 35,     # 均线突破
-            "BB_SQUEEZE": 30,      # 布林带挤压突破
-            "GOD_TIER_NX": 20,     # 完美回踩支撑
-            "STRONG_ADX": 20,      # 强趋势确认
-            "ADX_ACTIVATION": 20,  # 趋势刚刚启动
-            "OBV_TREND_UP": 15,    # 资金流入
-            "CAPITULATION": 12,    # 抛售高潮 (恐慌盘)
-            "HEAVY_VOLUME": 10,    # 放量
-            "MACD_ZERO_CROSS": 10, # MACD 金叉
-            "MACD_DIVERGE": 10,    # MACD 底背离
-            "KDJ_REBOUND": 8,      # KDJ 反弹
-            "CANDLE_PATTERN": 5    # K线形态 (吞没/晨星等)
+            "PATTERN_BREAK": 40,   
+            "NX_BREAKOUT": 35,     
+            "BB_SQUEEZE": 30,      
+            "GOD_TIER_NX": 20,     
+            "STRONG_ADX": 20,      
+            "ADX_ACTIVATION": 20,  
+            "OBV_TREND_UP": 15,    
+            "CAPITULATION": 12,    
+            "HEAVY_VOLUME": 10,    
+            "MACD_ZERO_CROSS": 10, 
+            "MACD_DIVERGE": 10,    
+            "KDJ_REBOUND": 8,      
+            "CANDLE_PATTERN": 5    
         },
-
         "EMOJI": { 
             100: "TOP", 90: "HIGH", 80: "MID", 70: "LOW", 60: "TEST"
         }
@@ -178,11 +166,13 @@ def calculate_nx_indicators(df):
       
     df = df[df['close'] > 0]
       
+    # Nx Indicators
     df['Nx_Blue_UP'] = df['high'].ewm(span=24, adjust=False).mean()
     df['Nx_Blue_DW'] = df['low'].ewm(span=23, adjust=False).mean()
     df['Nx_Yellow_UP'] = df['high'].ewm(span=89, adjust=False).mean()
     df['Nx_Yellow_DW'] = df['low'].ewm(span=90, adjust=False).mean()
       
+    # MACD
     price_col = 'close'
     exp12 = df[price_col].ewm(span=12, adjust=False).mean()
     exp26 = df[price_col].ewm(span=26, adjust=False).mean()
@@ -190,6 +180,7 @@ def calculate_nx_indicators(df):
     df['DEA'] = df['DIF'].ewm(span=9, adjust=False).mean()
     df['MACD'] = (df['DIF'] - df['DEA']) * 2
       
+    # RSI
     delta = df[price_col].diff()
     gain = (delta.clip(lower=0)).rolling(window=14).mean()
     loss = (-delta.clip(upper=0)).rolling(window=14).mean()
@@ -198,18 +189,21 @@ def calculate_nx_indicators(df):
       
     df['Vol_MA20'] = df['volume'].rolling(window=20).mean()
       
+    # ATR
     df['tr1'] = df['high'] - df['low']
     df['tr2'] = abs(df['high'] - df['close'].shift(1))
     df['tr3'] = abs(df['low'] - df['close'].shift(1))
     df['TR'] = df[['tr1', 'tr2', 'tr3']].max(axis=1)
     df['ATR'] = df['TR'].rolling(window=14).mean()
 
+    # BB
     df['BB_Mid'] = df['close'].rolling(20).mean()
     df['BB_Std'] = df['close'].rolling(20).std()
     df['BB_Up'] = df['BB_Mid'] + 2 * df['BB_Std']
     df['BB_Low'] = df['BB_Mid'] - 2 * df['BB_Std']
     df['BB_Width'] = (df['BB_Up'] - df['BB_Low']) / df['BB_Mid']
 
+    # KDJ
     low_min = df['low'].rolling(9).min()
     high_max = df['high'].rolling(9).max()
     rsv_denom = (high_max - low_min).replace(0, 1e-9)
@@ -218,6 +212,7 @@ def calculate_nx_indicators(df):
     df['D'] = df['K'].ewm(com=2).mean()
     df['J'] = 3 * df['K'] - 2 * df['D']
 
+    # ADX
     alpha = 1/14
     df['up_move'] = df['high'] - df['high'].shift(1)
     df['down_move'] = df['low'].shift(1) - df['low']
@@ -233,14 +228,17 @@ def calculate_nx_indicators(df):
     df['DX'] = 100 * abs(df['PDI'] - df['MDI']) / dx_denom
     df['ADX'] = df['DX'].ewm(alpha=alpha, adjust=False).mean()
 
+    # Bias
     df['MA50'] = df['close'].rolling(50).mean()
     ma50_safe = df['MA50'].replace(0, np.nan) 
     df['BIAS_50'] = (df['close'] - ma50_safe) / ma50_safe
 
+    # Shadow
     candle_range = (df['high'] - df['low']).replace(0, 1e-9)
     upper_shadow = np.where(df['close'] >= df['open'], df['high'] - df['close'], df['high'] - df['open'])
     df['Upper_Shadow_Ratio'] = upper_shadow / candle_range
 
+    # OBV
     obv_sign = np.sign(df['close'].diff()).fillna(0)
     df['OBV'] = (df['volume'] * obv_sign).cumsum()
     df['OBV_MA20'] = df['OBV'].rolling(window=20).mean()
@@ -437,6 +435,7 @@ def identify_patterns(df):
     t_start = df.index[vis_start_idx]
     t_end = df.index[curr_idx]
     
+    # --- 1. 阻力线 (Resistance) ---
     if pivots_high:
         candidates_anchor = [p for p in pivots_high if p[2] < curr_idx - 15]
         if candidates_anchor:
@@ -471,6 +470,7 @@ def identify_patterns(df):
                 curr_price = df['close'].iloc[-1]
                 if curr_price > p_end: pattern_name = "趋势突破 (由守转攻)"
 
+    # --- 2. 支撑线 (Support) ---
     if pivots_low:
         candidates_anchor_low = [p for p in pivots_low if p[2] < curr_idx - 15]
         if candidates_anchor_low:
@@ -489,7 +489,8 @@ def identify_patterns(df):
                     subset_lows = df['low'].iloc[check_start:check_end+1].values
                     subset_indices = np.arange(check_start, check_end+1)
                     line_vals = m_sup * subset_indices + c_sup
-                    if np.any(subset_lows < line_vals * 0.98): is_valid_sup = False
+                    # 稍微放宽容错
+                    if np.any(subset_lows < line_vals * 0.97): is_valid_sup = False
                 if is_valid_sup: best_sup_line = (m_sup, c_sup)
             if best_sup_line:
                 m_sup, c_sup = best_sup_line
@@ -660,7 +661,7 @@ async def check_signals(df):
     return await asyncio.to_thread(check_signals_sync, df)
 
 # -----------------------------------------------------------------------------
-# [核心修改] 图表生成函数 - 终极形态 (Volume Profile + 单色底部成交量 + Nx 实心带)
+# [核心修改] 图表生成函数
 # -----------------------------------------------------------------------------
 def _generate_chart_sync(df, ticker, res_line=[], sup_line=[], stop_price=None, support_price=None, anchor_idx=None):
     buf = io.BytesIO()
@@ -675,7 +676,7 @@ def _generate_chart_sync(df, ticker, res_line=[], sup_line=[], stop_price=None, 
     future_df = pd.DataFrame(index=future_dates, columns=plot_df.columns)
     plot_df = pd.concat([plot_df, future_df])
 
-    # --- Volume Profile 计算 ---
+    # --- Volume Profile ---
     valid_df = plot_df.dropna(subset=['close', 'volume'])
     if not valid_df.empty:
         price_min = valid_df['low'].min()
@@ -699,58 +700,48 @@ def _generate_chart_sync(df, ticker, res_line=[], sup_line=[], stop_price=None, 
     stop_line_data = [stop_price] * total_len
     supp_line_data = [support_price] * total_len
 
-    # --- 修复后的 Clipping Logic (防止报错) ---
+    # --- Clipping Logic (Reverted extension, safer clipping) ---
     def clip_line_segments(segments):
         new_segments = []
         if not segments: return new_segments
         
-        # 获取图表可见范围的起始时间戳
         plot_start_date = plot_df.index[0]
         plot_start_ts = plot_start_date.timestamp()
         
         for seg in segments:
             d1, p1 = seg[0]
             d2, p2 = seg[1]
-            
             try:
-                # 统一转换为 timestamp 进行比较
                 if isinstance(d1, pd.Timestamp): d1_ts = d1.timestamp()
                 else: d1_ts = d1.timestamp()
-                
                 if isinstance(d2, pd.Timestamp): d2_ts = d2.timestamp()
                 else: d2_ts = d2.timestamp()
 
-                # 情况1: 线段完全在图表左侧，丢弃
-                if d2_ts < plot_start_ts:
-                    continue
+                if d2_ts < plot_start_ts: continue 
                 
-                # 情况2: 线段跨越左边界，需要裁剪起点
                 if d1_ts < plot_start_ts:
                     if d2_ts - d1_ts == 0: continue
-                    # 计算斜率 m = (y2 - y1) / (x2 - x1)
                     slope = (p2 - p1) / (d2_ts - d1_ts)
-                    # 计算新起点 y = y1 + m * (x_new - x1)
                     new_p1 = p1 + slope * (plot_start_ts - d1_ts)
                     new_segments.append([(plot_start_date, new_p1), (d2, p2)])
                 else:
-                    # 情况3: 线段完全在视野内，保留
                     new_segments.append(seg)
-            except: 
-                continue
+            except: continue
         return new_segments
 
     res_line_clipped = clip_line_segments(res_line)
     sup_line_clipped = clip_line_segments(sup_line)
 
-    # --- 样式定制 (TrendSpider 风格) ---
+    # --- 样式定制 ---
     premium_bg_color = '#131722'
     grid_color = '#2a2e39'
     text_color = '#b2b5be'
-    
-    # [关键修改] 底部成交量改为单色 (深蓝灰 #3b404e)，不再随K线变色
+    # [修改] 底部成交量单色且无边框
+    volume_color = '#3b404e'
     my_marketcolors = mpf.make_marketcolors(
         up='#089981', down='#f23645', edge='inherit', wick='inherit', 
-        volume='#3b404e',  # 单色成交量
+        volume=volume_color, 
+        edge={'volume': volume_color}, # 无轮廓
         ohlc='inherit'
     )
     
@@ -769,18 +760,16 @@ def _generate_chart_sync(df, ticker, res_line=[], sup_line=[], stop_price=None, 
         }
     )
 
-    # [关键] Nx 结构实心填充配置 (无轮廓线)
+    # [修改] Nx 结构实心填充 (透明度 0.1, 边框移除)
     fill_between_config = [
-        # 蓝梯实心带 (Nx Blue)
-        dict(y1=plot_df['Nx_Blue_UP'].values, y2=plot_df['Nx_Blue_DW'].values, color='dodgerblue', alpha=0.2),
-        # 黄梯实心带 (Nx Yellow)
-        dict(y1=plot_df['Nx_Yellow_UP'].values, y2=plot_df['Nx_Yellow_DW'].values, color='gold', alpha=0.2)
+        dict(y1=plot_df['Nx_Blue_UP'].values, y2=plot_df['Nx_Blue_DW'].values, color='dodgerblue', alpha=0.1),
+        dict(y1=plot_df['Nx_Yellow_UP'].values, y2=plot_df['Nx_Yellow_DW'].values, color='gold', alpha=0.1)
     ]
 
     add_plots = [
-        # 注意：这里移除了 Nx 结构的 make_addplot 调用，只保留 fill_between
+        # [修改] 布林中轨加粗 (0.9)
         mpf.make_addplot(plot_df['BB_Up'], color='#9370DB', linestyle=':', width=0.6, alpha=0.5),
-        mpf.make_addplot(plot_df['BB_Mid'], color='#9370DB', linestyle=':', width=0.4, alpha=0.3), 
+        mpf.make_addplot(plot_df['BB_Mid'], color='#9370DB', linestyle=':', width=0.9, alpha=0.7), # Thicker mid
         mpf.make_addplot(plot_df['BB_Low'], color='#9370DB', linestyle=':', width=0.6, alpha=0.5),
         mpf.make_addplot(stop_line_data, color='red', linestyle='--', width=0.8, alpha=0.6), 
         mpf.make_addplot(supp_line_data, color='green', linestyle=':', width=0.8, alpha=0.6), 
@@ -800,30 +789,30 @@ def _generate_chart_sync(df, ticker, res_line=[], sup_line=[], stop_price=None, 
         tight_layout=True, datetime_format='%m-%d', xrotation=0, figsize=(10, 6),
         returnfig=True, 
         scale_padding={'right': 1.0},
-        fill_between=fill_between_config # 注入实心带配置
+        fill_between=fill_between_config 
     )
       
     if seq_of_points:
+        # [修改] 旗形线细度 0.3
         kwargs['alines'] = dict(
             alines=seq_of_points,
-            colors='white', linewidths=0.8, linestyle='-', alpha=1.0 
+            colors='white', linewidths=0.3, linestyle='-', alpha=1.0 
         )
       
     try:
         fig, axlist = mpf.plot(plot_df, **kwargs)
         ax_main = axlist[0]
         
-        # --- 绘制右侧半透明 Volume Profile ---
+        # --- 绘制右侧 Volume Profile (透明度 0.05) ---
         if not valid_df.empty:
             ax_vp = ax_main.twiny()
             max_vol = max(vol_bull.max(), vol_bear.max()) if len(vol_bull) > 0 else 1
-            # 挤压到右侧 1/4 区域
             ax_vp.set_xlim(0, max_vol * 4) 
-            ax_vp.invert_xaxis() # 反转X轴，让柱子贴右边
+            ax_vp.invert_xaxis() 
             
-            # 绘制水平柱状图 (alpha=0.3 实现半透明)
-            ax_vp.barh(bin_centers, vol_bear, height=bar_height, color='#f23645', alpha=0.3, align='center', zorder=0)
-            ax_vp.barh(bin_centers, vol_bull, height=bar_height, color='#089981', alpha=0.3, align='center', left=vol_bear, zorder=0)
+            # [修改] alpha=0.05
+            ax_vp.barh(bin_centers, vol_bear, height=bar_height, color='#f23645', alpha=0.05, align='center', zorder=0)
+            ax_vp.barh(bin_centers, vol_bull, height=bar_height, color='#089981', alpha=0.05, align='center', left=vol_bear, zorder=0)
             ax_vp.axis('off')
 
         fig.savefig(buf, format='png', bbox_inches='tight', pad_inches=0.1, dpi=150)
@@ -837,7 +826,6 @@ def _generate_chart_sync(df, ticker, res_line=[], sup_line=[], stop_price=None, 
         
     return buf
 
-# [修改] 增加参数 anchor_idx
 async def generate_chart(df, ticker, res_line=[], sup_line=[], stop_price=None, support_price=None, anchor_idx=None):
     return await asyncio.to_thread(_generate_chart_sync, df, ticker, res_line, sup_line, stop_price, support_price, anchor_idx)
 
