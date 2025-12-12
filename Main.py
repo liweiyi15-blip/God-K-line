@@ -59,8 +59,8 @@ CONFIG = {
         "max_60d_gain": 0.3,
 
         # [防过热] RSI 超买限制
-        # 含义：RSI(14) 指标不能超过 55。
-        "max_rsi": 55,
+        # 含义：RSI(14) 指标不能超过 60。
+        "max_rsi": 60,
 
         # [防回落] 乖离率限制
         # 含义：现价不能比 50日均线 (MA50) 高出 20%。
@@ -123,13 +123,50 @@ CONFIG = {
     },
 
     # -------------------------------------------------------------------------
-    # [4] 打分权重 (Score)
+    # [4] 打分权重 (Score) & 条件参数 (Params)
     # -------------------------------------------------------------------------
     "SCORE": { 
         # [及格线]
         "MIN_ALERT_SCORE": 70, 
 
-        # [加分项]
+        # [新增] 策略参数表：这里控制触发得分的具体条件
+        "PARAMS": {
+            # 1. 巨量 (HEAVY_VOLUME)
+            # 含义：当前成交量是 20日均量 的多少倍才算巨量？
+            "heavy_vol_multiplier": 2.0, 
+
+            # 2. 强趋势 (STRONG_ADX)
+            # 含义：ADX 大于多少才算强趋势？
+            "adx_strong_threshold": 25,
+
+            # 3. 趋势激活 (ADX_ACTIVATION)
+            # 含义：之前的 ADX 必须小于多少（代表盘整），现在拐头向上才算激活？
+            "adx_activation_lower": 20,
+
+            # 4. KDJ 反击 (KDJ_REBOUND)
+            # 含义：昨天的 J 线必须小于多少（超卖），今天金叉才给分？
+            "kdj_j_oversold": 0,
+
+            # 5. MACD 底背离 (MACD_DIVERGE)
+            # 含义：股价必须接近过去20天最低价的多少范围？(1.02 = 2%以内)
+            "divergence_price_tolerance": 1.02,
+            # 含义：当前 MACD 值必须高于过去最低 MACD 的多少？(0.8 = 只要不比最低点低太多就行，或者比最低点高)
+            "divergence_macd_strength": 0.8,
+
+            # 6. OBV 资金流 (OBV_TREND_UP)
+            # 含义：比较当前 OBV 和多少天前的 OBV？(确认近期是在流入)
+            "obv_lookback": 5,
+
+            # 7. 抛售高潮 (CAPITULATION)
+            # 含义：量能必须大于均量的多少倍？
+            "capitulation_vol_mult": 2.5,
+            # 含义：下影线比例必须大于多少？(0.5 = 下影线占K线一半以上)
+            "capitulation_pinbar": 0.5,
+            # 含义：市值小于多少才算小盘股容易被操纵？(50亿)
+            "capitulation_mcap": 5_000_000_000
+        },
+
+        # [加分项] 分值权重
         "WEIGHTS": {
             # --- 第一梯队：最强信号 ---
             "PATTERN_BREAK": 40,   # 形态突破
@@ -694,6 +731,7 @@ def check_signals_sync(df):
     triggers = []
     score = 0
     weights = CONFIG["SCORE"]["WEIGHTS"]
+    params = CONFIG["SCORE"]["PARAMS"] # [新增] 引用配置参数
     violations = [] 
 
     low_60 = df['low'].tail(60).min()
@@ -749,7 +787,8 @@ def check_signals_sync(df):
         # [修改] 名称统一为 过滤器
         violations.append("过滤器: 量能不足")
 
-    if proj_vol_final > curr['Vol_MA20'] * 2.0:
+    # [修改] 使用配置参数
+    if proj_vol_final > curr['Vol_MA20'] * params["heavy_vol_multiplier"]:
         score += weights["HEAVY_VOLUME"]
 
     candle_patterns = detect_candle_patterns(df)
@@ -773,14 +812,16 @@ def check_signals_sync(df):
                     triggers.append(f"BB Squeeze: 低位启动 (宽:{curr['BB_Width']:.3f}, 位:{price_pos:.2f})")
                     score += weights["BB_SQUEEZE"]
 
-    is_strong_trend = curr['ADX'] > 25 and curr['PDI'] > curr['MDI']
+    # [修改] 使用配置参数
+    is_strong_trend = curr['ADX'] > params["adx_strong_threshold"] and curr['PDI'] > curr['MDI']
     is_adx_rising = curr['ADX'] > prev['ADX']
       
     if is_strong_trend and is_adx_rising:
         score += weights["STRONG_ADX"]
         
     recent_adx_min = df['ADX'].iloc[-10:-1].min()
-    adx_activating = (recent_adx_min < 20) and \
+    # [修改] 使用配置参数
+    adx_activating = (recent_adx_min < params["adx_activation_lower"]) and \
                       (df['ADX'].iloc[-1] > df['ADX'].iloc[-2] > df['ADX'].iloc[-3])
                       
     if adx_activating:
@@ -809,20 +850,25 @@ def check_signals_sync(df):
         triggers.append(f"MACD 金叉")
         score += weights["MACD_ZERO_CROSS"]
 
-    if prev['J'] < 0 and curr['J'] > 0 and curr['K'] > curr['D']:
+    # [修改] 使用配置参数
+    if prev['J'] < params["kdj_j_oversold"] and curr['J'] > 0 and curr['K'] > curr['D']:
         triggers.append(f"KDJ 反击")
         score += weights["KDJ_REBOUND"]
       
     price_low_20 = df['close'].tail(20).min()
-    price_is_low = curr['close'] <= price_low_20 * 1.02
+    # [修改] 使用配置参数
+    price_is_low = curr['close'] <= price_low_20 * params["divergence_price_tolerance"]
     macd_low_20 = df['MACD'].tail(20).min()
     if price_is_low and curr['MACD'] < 0:
-        if curr['MACD'] > macd_low_20 * 0.8 and curr['DIF'] > df['DIF'].tail(20).min():
+        # [修改] 使用配置参数
+        if curr['MACD'] > macd_low_20 * params["divergence_macd_strength"] and curr['DIF'] > df['DIF'].tail(20).min():
              triggers.append(f"MACD 底背离")
              score += weights["MACD_DIVERGE"]
 
     if curr['OBV'] > curr['OBV_MA20']:
-        obv_rising = curr['OBV'] > df['OBV'].iloc[-5]
+        # [修改] 使用配置参数
+        obv_lookback = params["obv_lookback"]
+        obv_rising = curr['OBV'] > df['OBV'].iloc[-obv_lookback]
         if obv_rising and curr['close'] > curr['open']:
              triggers.append("资金面: OBV趋势向上 (资金流入)")
              score += weights["OBV_TREND_UP"]
@@ -831,8 +877,9 @@ def check_signals_sync(df):
     market_cap = df.attrs.get('marketCap', float('inf')) 
       
     if curr['low'] < curr['BB_Low']:
-        if proj_vol_final > curr['Vol_MA20'] * 2.5:
-            if pinbar_ratio > 0.5 and market_cap < 5_000_000_000:
+        # [修改] 使用配置参数
+        if proj_vol_final > curr['Vol_MA20'] * params["capitulation_vol_mult"]:
+            if pinbar_ratio > params["capitulation_pinbar"] and market_cap < params["capitulation_mcap"]:
                 triggers.append(f"抛售高潮")
                 score += weights["CAPITULATION"]
 
