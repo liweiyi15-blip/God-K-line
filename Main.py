@@ -421,7 +421,7 @@ async def fetch_historical_batch(symbols: list, days=None):
     now = datetime.now()
     from_date = (now - timedelta(days=days + 60)).strftime("%Y-%m-%d") 
     to_date = now.strftime("%Y-%m-%d")
-    
+      
     connector = aiohttp.TCPConnector(limit=3)
     semaphore = asyncio.Semaphore(3)
       
@@ -467,7 +467,7 @@ async def fetch_historical_batch(symbols: list, days=None):
 async def fetch_realtime_quotes(symbols: list):
     if not symbols: return {}
     quotes_map = {}
-    
+      
     connector = aiohttp.TCPConnector(limit=5)
     semaphore = asyncio.Semaphore(5)
     headers = {"User-Agent": "StockBot/1.0", "Accept": "application/json"}
@@ -492,8 +492,8 @@ async def fetch_realtime_quotes(symbols: list):
                                     s = item.get('symbol')
                                     if s: quotes_map[s] = item
                             elif isinstance(data, dict):
-                                 s = data.get('symbol')
-                                 if s: quotes_map[s] = data
+                                     s = data.get('symbol')
+                                     if s: quotes_map[s] = data
                             break
                         else:
                              logging.error(f"[Quote Error] {sym} Status: {response.status}")
@@ -512,9 +512,9 @@ async def fetch_market_index_data(days=60):
     now = datetime.now()
     from_date = (now - timedelta(days=days + 30)).strftime("%Y-%m-%d")
     to_date = now.strftime("%Y-%m-%d")
-    
+      
     url = f"https://financialmodelingprep.com/stable/historical-price-eod/light?symbol=%5EIXIC&from={from_date}&to={to_date}&apikey={FMP_API_KEY}"
-    
+      
     async with aiohttp.ClientSession() as session:
         try:
             async with session.get(url) as response:
@@ -560,105 +560,134 @@ def find_pivots(df, window=10):
             
     return pivots_high, pivots_low
 
-# [核心修复] 重写形态识别算法，完全复刻 TrendSpider 的画法
+# [核心修复] 重写形态识别算法，尝试寻找最贴合的趋势线，而非仅仅连接最高点
 def identify_patterns(df):
     if len(df) < 60: return None, [], []
       
+    # 寻找 Pivot 点 (High/Low)
     pivots_high, pivots_low = find_pivots(df, window=10)
-    
+      
     res_line, sup_line = [], []
     pattern_name = None
-    
-    # 过去 250 天的总高低点（作为全局锚点）
+      
+    # 过去 250 天作为全局锚点视窗
     vis_start_idx = max(0, len(df) - 250)
     curr_idx = len(df) - 1
-    
+      
     # --- 1. 阻力线 (Resistance) ---
-    # 策略：找到全局最高点 (Global Max) 作为起点，连接右侧最高的点
-    # 这确保了阻力线是从“山顶”压下来的，而不是半山腰
+    # 策略改进：不只取绝对最高点，而是尝试前几个最高点作为Anchor，
+    # 找到一条既是下降趋势，又没有被中间K线显著突破的“最佳”外包线。
     if len(pivots_high) >= 2:
-        # 排除最近 10 天的数据作为 Anchor，防止刚形成的高点就画长线
+        # 排除最近 10 天的数据作为 Anchor
         valid_pivots = [p for p in pivots_high if p[2] < curr_idx - 10]
         
         if valid_pivots:
-            # 找到价格最高的点 (TrendSpider 逻辑)
-            anchor_high = max(valid_pivots, key=lambda x: x[1]) 
-            idx_1 = anchor_high[2]
-            
-            # 在 Anchor 之后，寻找第二点
-            # 必须在 Anchor 之后至少 20 天，才有资格构成长期趋势
-            candidates = [p for p in valid_pivots if p[2] > idx_1 + 20]
-            
-            if candidates:
-                # 在 Anchor 之后的所有高点中，找最高的那个 (或者最能构成切线的)
-                # 这里简单取最高点，通常就是 TrendSpider 的画法 (外包络线)
-                target_high = max(candidates, key=lambda x: x[1])
-                idx_2 = target_high[2]
-                
-                # 计算直线方程 y = mx + c
-                x1, y1 = idx_1, anchor_high[1]
-                x2, y2 = idx_2, target_high[1]
-                
-                if x2 != x1:
-                    m = (y2 - y1) / (x2 - x1)
-                    c = y1 - m * x1
+            # 1. 按价格从高到低排序 pivots
+            sorted_pivots = sorted(valid_pivots, key=lambda x: x[1], reverse=True)
+            # 2. 取前 3 个最高点作为候选 Anchor (起点)
+            potential_anchors = sorted_pivots[:3]
+
+            best_res_line_data = None # 存储最佳线的 (m, c, idx_1, idx_2)
+
+            # 3. 遍历候选 Anchor，寻找最佳连线
+            for anchor_high in potential_anchors:
+                idx_1 = anchor_high[2]
+                # 在 Anchor 之后至少 20 天寻找第二点
+                candidates = [p for p in valid_pivots if p[2] > idx_1 + 20]
+
+                if candidates:
+                    # 在后面的点中，仍然选取最高的那个，以形成外包络
+                    target_high = max(candidates, key=lambda x: x[1])
+                    idx_2 = target_high[2]
                     
-                    # 只有下降趋势或走平才画 (Flag/Wedge 上轨通常向下)
-                    if m < 0.05:
-                        # 延伸到当前
-                        p_start = m * vis_start_idx + c
-                        p_end = m * curr_idx + c
+                    # 计算直线方程 y = mx + c
+                    x1, y1 = idx_1, anchor_high[1]
+                    x2, y2 = idx_2, target_high[1]
+                    
+                    if x2 != x1:
+                        m = (y2 - y1) / (x2 - x1)
+                        c = y1 - m * x1
                         
-                        t_start = df.index[vis_start_idx]
-                        t_end = df.index[curr_idx]
-                        
-                        res_line = [[(t_start, p_start), (t_end, p_end)]]
-                        
-                        # --- 2. 支撑线 (Support) ---
-                        # 策略：强制在时间轴的“前半段”找低点作为起点，避免线缩在右下角
-                        # 找到区间前 60% 时间内的最低点
-                        mid_point_idx = vis_start_idx + (curr_idx - vis_start_idx) * 0.6
-                        
-                        early_lows = [p for p in pivots_low if p[2] <= mid_point_idx]
-                        later_lows = [p for p in pivots_low if p[2] > mid_point_idx]
-                        
-                        if early_lows and later_lows:
-                            # 起点：前半段的最低点
-                            anchor_low = min(early_lows, key=lambda x: x[1])
-                            lx1, ly1 = anchor_low[2], anchor_low[1]
+                        # 确保是下降趋势或走平 (Flag/Wedge 上轨通常向下)
+                        # 稍微放宽一点到 0.05 允许极其缓慢的上升旗形
+                        if m < 0.05:
+                            # --- 关键验证步骤 ---
+                            # 检查这两个点中间(P1和P2之间)，有没有其他 pivot 高点显著突破了这条线？
+                            # 如果中间有价格大大高出这条线，说明这不是一条好的外包阻力线，被破坏了。
+                            is_valid_line = True
+                            for p in valid_pivots:
+                                p_idx, p_price = p[2], p[1]
+                                # 只检查 P1 和 P2 之间的点
+                                if idx_1 < p_idx < idx_2:
+                                    line_price_at_p = m * p_idx + c
+                                    # 如果中间某个高点超过线 1% (容错率)，认为这条线无效
+                                    if p_price > line_price_at_p * 1.01:
+                                        is_valid_line = False
+                                        break
                             
-                            # 终点：后半段的最低点
-                            target_low = min(later_lows, key=lambda x: x[1])
-                            lx2, ly2 = target_low[2], target_low[1]
-                            
-                            if lx2 != lx1:
-                                m_sup = (ly2 - ly1) / (lx2 - lx1)
-                                c_sup = ly1 - m_sup * lx1
-                                
-                                lp_start = m_sup * vis_start_idx + c_sup
-                                lp_end = m_sup * curr_idx + c_sup
-                                
-                                sup_line = [[(t_start, lp_start), (t_end, lp_end)]]
-                                
-                                # --- 3. 突破验证 & Apex ---
-                                res_today = m * curr_idx + c
-                                curr_price = df['close'].iloc[-1]
-                                
-                                # 计算交点
-                                is_valid_structure = True
-                                if abs(m - m_sup) > 1e-9:
-                                    apex_x = (c_sup - c) / (m - m_sup)
-                                    if curr_idx > apex_x + 10: # 稍微放宽一点容错
-                                        is_valid_structure = False
-                                
-                                # 触发条件：结构有效 + 阻力线向下 + 支撑线收敛(或平行通道)
-                                if is_valid_structure:
-                                    # 价格突破阻力线
-                                    if curr_price > res_today:
-                                        # 防止假突破太远
-                                        if curr_price < res_today * 1.05:
-                                            pattern_name = "形态突破 (旗形/楔形)"
-                                            
+                            if is_valid_line:
+                                # 找到了第一条有效的线。
+                                # 因为我们是按 Anchor 价格从高到低遍历的，所以这仍然是符合条件的最高有效线。
+                                best_res_line_data = (m, c, idx_1, idx_2)
+                                break # 找到最佳，跳出 Anchor 循环
+            
+            # 4. 如果找到了最佳阻力线，生成绘图数据
+            if best_res_line_data:
+                m, c, idx_1, idx_2 = best_res_line_data
+                # 延伸到视野起点和终点
+                p_start = m * vis_start_idx + c
+                p_end = m * curr_idx + c
+                
+                t_start = df.index[vis_start_idx]
+                t_end = df.index[curr_idx]
+                
+                res_line = [[(t_start, p_start), (t_end, p_end)]]
+                        
+                # --- 2. 支撑线 (Support) ---
+                # 策略：支撑线的寻找逻辑保持不变，在前半段和后半段找最低点连线
+                mid_point_idx = vis_start_idx + (curr_idx - vis_start_idx) * 0.6
+                
+                early_lows = [p for p in pivots_low if p[2] <= mid_point_idx]
+                later_lows = [p for p in pivots_low if p[2] > mid_point_idx]
+                
+                if early_lows and later_lows:
+                    # 起点：前半段的最低点
+                    anchor_low = min(early_lows, key=lambda x: x[1])
+                    lx1, ly1 = anchor_low[2], anchor_low[1]
+                    
+                    # 终点：后半段的最低点
+                    target_low = min(later_lows, key=lambda x: x[1])
+                    lx2, ly2 = target_low[2], target_low[1]
+                    
+                    if lx2 != lx1:
+                        m_sup = (ly2 - ly1) / (lx2 - lx1)
+                        c_sup = ly1 - m_sup * lx1
+                        
+                        lp_start = m_sup * vis_start_idx + c_sup
+                        lp_end = m_sup * curr_idx + c_sup
+                        
+                        sup_line = [[(t_start, lp_start), (t_end, lp_end)]]
+                        
+                        # --- 3. 突破验证 & Apex ---
+                        res_today = m * curr_idx + c
+                        curr_price = df['close'].iloc[-1]
+                        
+                        # 计算交点 (Apex)
+                        is_valid_structure = True
+                        if abs(m - m_sup) > 1e-9:
+                            apex_x = (c_sup - c) / (m - m_sup)
+                            # 稍微放宽一点容错，Apex 不能在太远的未来
+                            if curr_idx > apex_x + 15: 
+                                is_valid_structure = False
+                        
+                        # 触发条件：结构有效 + 阻力线向下 + 支撑线收敛(或平行通道)
+                        if is_valid_structure:
+                            # 价格突破阻力线
+                            if curr_price > res_today:
+                                # 防止假突破太远 (5%以内)
+                                if curr_price < res_today * 1.05:
+                                    pattern_name = "形态突破 (旗形/楔形)"
+                                                            
     return pattern_name, res_line, sup_line
 
 def detect_candle_patterns(df):
@@ -736,7 +765,7 @@ def check_signals_sync(df):
 
     low_60 = df['low'].tail(60).min()
     high_60 = df['high'].tail(60).max()
-    
+      
     if curr['close'] > low_60 * (1 + CONFIG["filter"]["max_60d_gain"]): 
         # [修改] 名称统一为 过滤器
         violations.append("过滤器: 短期涨幅过大")
@@ -799,7 +828,7 @@ def check_signals_sync(df):
     bb_min_width = CONFIG["filter"]["min_bb_squeeze_width"]
     bb_target_width = CONFIG["filter"]["min_bb_expand_width"]
     max_pos = CONFIG["filter"]["max_bottom_pos"]
-    
+      
     if high_60 > low_60:
         price_pos = (curr['close'] - low_60) / (high_60 - low_60)
     else:
@@ -903,16 +932,16 @@ def _generate_chart_sync(df, ticker, res_line=[], sup_line=[], stop_price=None, 
 
     s = mpf.make_marketcolors(up='r', down='g', inherit=True)
     my_style = mpf.make_mpf_style(base_mpl_style="ggplot", marketcolors=s, gridstyle=":")
-    
+      
     # [修改] 动态调整画图范围，确保容纳长周期趋势线
     lookback_days = 80 # 默认至少看80天
     start_idx = max(0, len(df) - lookback_days)
-    
-    all_lines = (res_line or []) + (sup_line or [])
+      
+    all_lines_for_zoom = (res_line or []) + (sup_line or [])
     min_line_date = None
-    
-    if all_lines:
-        line_dates = [line[0][0] for line in all_lines]
+      
+    if all_lines_for_zoom:
+        line_dates = [line[0][0] for line in all_lines_for_zoom]
         if line_dates:
             min_line_date = min(line_dates)
             
@@ -925,7 +954,7 @@ def _generate_chart_sync(df, ticker, res_line=[], sup_line=[], stop_price=None, 
             
     # 多给一点左侧空间
     start_idx = max(0, start_idx - 5)
-    
+      
     plot_df = df.iloc[start_idx:]
       
     stop_line_data = [stop_price] * len(plot_df)
@@ -947,13 +976,19 @@ def _generate_chart_sync(df, ticker, res_line=[], sup_line=[], stop_price=None, 
       
     kwargs = dict(type='candle', style=my_style, title=f"{ticker} Analysis", ylabel='Price', addplot=add_plots, volume=True, panel_ratios=(6, 2, 2), tight_layout=True, savefig=dict(fname=buf, format='png', bbox_inches='tight', pad_inches=0))
       
-    all_lines = []
-      
-    if res_line: all_lines.extend(res_line)
-    if sup_line: all_lines.extend(sup_line)
+    # --- [修改] 趋势线样式配置 ---
+    alines_config = []
+    
+    # 阻力线 (Resistance): 蓝色实线，醒目
+    if res_line:
+        alines_config.append(dict(alines=res_line, colors='deepskyblue', linewidths=2.0, linestyle='-'))
         
-    if all_lines:
-        kwargs['alines'] = dict(alines=all_lines, colors='darkgray', linewidths=1.5, linestyle='-.')
+    # 支撑线 (Support): 深灰色实线，低调
+    if sup_line:
+        alines_config.append(dict(alines=sup_line, colors='dimgray', linewidths=1.5, linestyle='-'))
+        
+    if alines_config:
+        kwargs['alines'] = alines_config
       
     try:
         mpf.plot(plot_df, **kwargs)
