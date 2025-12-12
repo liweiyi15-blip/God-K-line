@@ -931,7 +931,7 @@ def check_signals_sync(df):
 async def check_signals(df):
     return await asyncio.to_thread(check_signals_sync, df)
 
-# [修改] 增加参数 anchor_idx
+# [修改] 增加参数 anchor_idx, 增加裁剪逻辑
 def _generate_chart_sync(df, ticker, res_line=[], sup_line=[], stop_price=None, support_price=None, anchor_idx=None):
     buf = io.BytesIO()
       
@@ -955,6 +955,54 @@ def _generate_chart_sync(df, ticker, res_line=[], sup_line=[], stop_price=None, 
 
     plot_df = df.iloc[start_idx:]
       
+    # [新增] 裁剪函数：确保线段不会超出plot_df的左边界
+    def clip_line_segments(segments):
+        new_segments = []
+        if not segments: return new_segments
+        
+        plot_start_date = plot_df.index[0]
+        
+        for seg in segments:
+            d1, p1 = seg[0]
+            d2, p2 = seg[1]
+            
+            # 如果整条线都在左边界左边，丢弃
+            if d2 < plot_start_date:
+                continue
+            
+            # 如果线段的起点在左边界左边，需要裁剪
+            if d1 < plot_start_date:
+                # 为了计算精确的裁剪点，我们需要找到对应的索引位置计算斜率
+                try:
+                    # 找到d1和d2在原始df中的整数索引
+                    i1 = df.index.get_loc(d1)
+                    i2 = df.index.get_loc(d2)
+                    
+                    if i2 == i1: continue
+                    
+                    # 计算斜率
+                    m = (p2 - p1) / (i2 - i1)
+                    
+                    # 计算新的起点（即start_idx处的价格）
+                    # new_p1 = p1 + m * (start_idx - i1)
+                    new_p1 = p1 + m * (start_idx - i1)
+                    new_d1 = plot_start_date
+                    
+                    new_segments.append([(new_d1, new_p1), (d2, p2)])
+                except Exception as e:
+                    logging.warning(f"Clipping error: {e}")
+                    # 如果计算出错，为了安全起见，保留原始线段（可能会报错）或者丢弃
+                    # 这里选择丢弃以防报错
+                    continue
+            else:
+                # 起点在范围内，无需裁剪
+                new_segments.append(seg)
+        return new_segments
+
+    # 应用裁剪
+    res_line_clipped = clip_line_segments(res_line)
+    sup_line_clipped = clip_line_segments(sup_line)
+
     stop_line_data = [stop_price] * len(plot_df)
     supp_line_data = [support_price] * len(plot_df)
 
@@ -973,19 +1021,17 @@ def _generate_chart_sync(df, ticker, res_line=[], sup_line=[], stop_price=None, 
     ]
     
     # --- 1. 准备趋势线 (alines) ---
-    # 改回灰色虚线，解决报错问题
     seq_of_points = []
     
-    if res_line:
-        # res_line 结构是 [[(d1, p1), (d2, p2)]]
-        for line in res_line:
-            # 确保将 numpy 类型转换为原生 float，防止 validator 报错
+    # 使用裁剪后的线段
+    if res_line_clipped:
+        for line in res_line_clipped:
             p1 = (line[0][0], float(line[0][1]))
             p2 = (line[1][0], float(line[1][1]))
             seq_of_points.append([p1, p2])
     
-    if sup_line:
-        for line in sup_line:
+    if sup_line_clipped:
+        for line in sup_line_clipped:
             p1 = (line[0][0], float(line[0][1]))
             p2 = (line[1][0], float(line[1][1]))
             seq_of_points.append([p1, p2])
