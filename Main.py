@@ -520,7 +520,7 @@ def identify_patterns(df):
                     
                     # [核心修改] 容错率改得非常严苛 (0.998)，强制线在K线下方
                     # 这样线就会被"顶"在最下方，类似地板
-                    if np.any(subset_lows < line_vals * 0.95): 
+                    if np.any(subset_lows < line_vals * 0.97): 
                         is_valid_sup = False
                 
                 if is_valid_sup:
