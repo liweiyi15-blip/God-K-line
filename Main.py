@@ -48,57 +48,69 @@ TIME_MARKET_OPEN = time(9, 30)
 TIME_MARKET_SCAN_START = time(10, 0) # 10点才开始报
 TIME_MARKET_CLOSE = time(16, 0)
 
-# --- 核心策略配置 ---
+# --- 核心策略配置 (已添加注释) ---
 CONFIG = {
+    # [1] 过滤器：如果股票触发这些条件，直接忽略 (一票否决)
     "filter": {
-        "max_60d_gain": 0.3,
-        "max_rsi": 60,
-        "max_bias_50": 0.20,
-        "max_upper_shadow": 0.4,
-        "max_day_change": 0.7,
-        "min_vol_ratio": 1.15,
-        "min_bb_squeeze_width": 0.08,
-        "min_bb_expand_width": 0.095,
-        "max_bottom_pos": 0.30,
-        "min_adx_for_squeeze": 15
+        "max_60d_gain": 0.3,          # [防追高] 过去60天涨幅超过 30% 则不看
+        "max_rsi": 60,                # [防过热] RSI(14) 超过 60 则不看 (只做底部)
+        "max_bias_50": 0.20,          # [防回落] 现价偏离 50日均线 20% 以上不看
+        "max_upper_shadow": 0.4,      # [防抛压] 上影线长度占整根K线 40% 以上不看
+        "max_day_change": 0.7,        # [防妖股] 单日涨跌幅超过 70% 不看 (数据异常或妖股)
+        "min_vol_ratio": 1.15,        # [资金门槛] 当前成交量必须 > 20日均量的 1.15倍
+        "min_bb_squeeze_width": 0.08, # [布林带] 之前盘整时的带宽最小值
+        "min_bb_expand_width": 0.095, # [布林带] 现在开口的带宽最小值
+        "max_bottom_pos": 0.30,       # [位置] 价格必须处于过去60天波动区间的底部 30% 区域
+        "min_adx_for_squeeze": 15     # [趋势] ADX 至少要 15 (哪怕是弱趋势)
     },
+
+    # [2] 形态识别
     "pattern": {
-        "pivot_window": 10
+        "pivot_window": 10            # [关键点] 识别高低点时，左右各看 10 根 K 线
     },
+
+    # [3] 系统设置
     "system": {
-        "cooldown_days": 3,
-        "max_charts_per_scan": 5,
-        "history_days": 300
+        "cooldown_days": 3,           # [防刷屏] 同一只股票报警后，3天内不再报警
+        "max_charts_per_scan": 5,     # [防拥堵] 每次扫描最多发送 5 张图表
+        "history_days": 300           # [数据源] 获取过去 300 天的历史数据
     },
+
+    # [4] 打分系统：满足条件加分，分数越高信号越强
     "SCORE": { 
-        "MIN_ALERT_SCORE": 70, 
+        "MIN_ALERT_SCORE": 70,        # [及格线] 总分 >= 70 才报警
+        
+        # 具体的参数阈值
         "PARAMS": {
-            "heavy_vol_multiplier": 1.55, 
-            "adx_strong_threshold": 25,
-            "adx_activation_lower": 20,
-            "kdj_j_oversold": 0,
-            "divergence_price_tolerance": 1.02,
-            "divergence_macd_strength": 0.8,
-            "obv_lookback": 5,
-            "capitulation_vol_mult": 2,      
-            "capitulation_pinbar": 0.5,      
-            "capitulation_mcap": 5_000_000_000 
+            "heavy_vol_multiplier": 1.55,   # [巨量] 量比 > 1.55 倍算巨量
+            "adx_strong_threshold": 25,     # [强趋势] ADX > 25 算强趋势
+            "adx_activation_lower": 20,     # [趋势激活] ADX 从 20 以下拐头向上
+            "kdj_j_oversold": 0,            # [超卖] KDJ 的 J 值小于 0
+            "divergence_price_tolerance": 1.02, # [背离] 价格创新低容差
+            "divergence_macd_strength": 0.8,    # [背离] MACD 强度系数
+            "obv_lookback": 5,              # [资金] OBV 回溯 5 天看趋势
+            "capitulation_vol_mult": 2,     # [抛售高潮] 量比 > 2 倍算恐慌抛售
+            "capitulation_pinbar": 0.5,     # [金针探底] 下影线占比 > 0.5
+            "capitulation_mcap": 5_000_000_000 # (未使用)
         },
+
+        # 每个信号对应的分值
         "WEIGHTS": {
-            "PATTERN_BREAK": 40,   
-            "NX_BREAKOUT": 35,     
-            "BB_SQUEEZE": 30,      
-            "GOD_TIER_NX": 20,     
-            "STRONG_ADX": 20,      
-            "ADX_ACTIVATION": 20,  
-            "OBV_TREND_UP": 15,    
-            "CAPITULATION": 12,    
-            "HEAVY_VOLUME": 10,    
-            "MACD_ZERO_CROSS": 10, 
-            "MACD_DIVERGE": 10,    
-            "KDJ_REBOUND": 8,      
-            "CANDLE_PATTERN": 5    
+            "PATTERN_BREAK": 40,   # 形态突破 (最重要)
+            "NX_BREAKOUT": 35,     # 均线突破
+            "BB_SQUEEZE": 30,      # 布林带挤压突破
+            "GOD_TIER_NX": 20,     # 完美回踩支撑
+            "STRONG_ADX": 20,      # 强趋势确认
+            "ADX_ACTIVATION": 20,  # 趋势刚刚启动
+            "OBV_TREND_UP": 15,    # 资金流入
+            "CAPITULATION": 12,    # 抛售高潮 (恐慌盘)
+            "HEAVY_VOLUME": 10,    # 放量
+            "MACD_ZERO_CROSS": 10, # MACD 金叉
+            "MACD_DIVERGE": 10,    # MACD 底背离
+            "KDJ_REBOUND": 8,      # KDJ 反弹
+            "CANDLE_PATTERN": 5    # K线形态 (吞没/晨星等)
         },
+
         "EMOJI": { 
             100: "TOP", 90: "HIGH", 80: "MID", 70: "LOW", 60: "TEST"
         }
