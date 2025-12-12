@@ -446,7 +446,7 @@ def identify_patterns(df):
     curr_idx = len(df) - 1
     t_start = df.index[vis_start_idx]
     t_end = df.index[curr_idx]
-    
+     
     # --- 1. 阻力线 (Resistance) ---
     if pivots_high:
         candidates_anchor = [p for p in pivots_high if p[2] < curr_idx - 15]
@@ -750,10 +750,11 @@ def _generate_chart_sync(df, ticker, res_line=[], sup_line=[], stop_price=None, 
     text_color = '#b2b5be'
     # [修改] 底部成交量单色且无边框
     volume_color = '#3b404e'
+    
+    # [FIXED HERE: Removing duplicate 'edge' argument]
     my_marketcolors = mpf.make_marketcolors(
         up='#089981', down='#f23645', edge='inherit', wick='inherit', 
         volume=volume_color, 
-        edge={'volume': volume_color}, # 无轮廓
         ohlc='inherit'
     )
     
