@@ -650,7 +650,7 @@ async def check_signals(df):
     return await asyncio.to_thread(check_signals_sync, df)
 
 # -----------------------------------------------------------------------------
-# [核心修改] 图表生成函数 - 终极形态 (Volume Profile + 单色底部成交量)
+# [核心修改] 图表生成函数 - 终极形态 (Volume Profile + 单色底部成交量 + Nx 实心带)
 # -----------------------------------------------------------------------------
 def _generate_chart_sync(df, ticker, res_line=[], sup_line=[], stop_price=None, support_price=None, anchor_idx=None):
     buf = io.BytesIO()
@@ -735,11 +735,16 @@ def _generate_chart_sync(df, ticker, res_line=[], sup_line=[], stop_price=None, 
         }
     )
 
+    # [关键] Nx 结构实心填充配置 (无轮廓线)
+    fill_between_config = [
+        # 蓝梯实心带 (Nx Blue)
+        dict(y1=plot_df['Nx_Blue_UP'].values, y2=plot_df['Nx_Blue_DW'].values, color='dodgerblue', alpha=0.2),
+        # 黄梯实心带 (Nx Yellow)
+        dict(y1=plot_df['Nx_Yellow_UP'].values, y2=plot_df['Nx_Yellow_DW'].values, color='gold', alpha=0.2)
+    ]
+
     add_plots = [
-        mpf.make_addplot(plot_df['Nx_Blue_UP'], color='dodgerblue', width=0.8),
-        mpf.make_addplot(plot_df['Nx_Blue_DW'], color='dodgerblue', width=0.8),
-        mpf.make_addplot(plot_df['Nx_Yellow_UP'], color='gold', width=0.8),
-        mpf.make_addplot(plot_df['Nx_Yellow_DW'], color='gold', width=0.8),
+        # 注意：这里移除了 Nx 结构的 make_addplot 调用，只保留 fill_between
         mpf.make_addplot(plot_df['BB_Up'], color='#9370DB', linestyle=':', width=0.6, alpha=0.5),
         mpf.make_addplot(plot_df['BB_Mid'], color='#9370DB', linestyle=':', width=0.4, alpha=0.3), 
         mpf.make_addplot(plot_df['BB_Low'], color='#9370DB', linestyle=':', width=0.6, alpha=0.5),
@@ -760,7 +765,8 @@ def _generate_chart_sync(df, ticker, res_line=[], sup_line=[], stop_price=None, 
         volume=True, volume_panel=1, panel_ratios=(3, 1),
         tight_layout=True, datetime_format='%m-%d', xrotation=0, figsize=(10, 6),
         returnfig=True, 
-        scale_padding={'right': 1.0} 
+        scale_padding={'right': 1.0},
+        fill_between=fill_between_config # 注入实心带配置
     )
       
     if seq_of_points:
@@ -1191,32 +1197,46 @@ async def stats_command(interaction: discord.Interaction):
     for date_str in sorted_dates:
         try: sig_date = datetime.strptime(date_str, "%Y-%m-%d").date()
         except: continue
-        if (today - sig_date).days > 25: continue
+        
+        days_diff = (today - sig_date).days
+        if days_diff > 25: continue
+        
         tickers_data = history[date_str]
         for ticker, data in tickers_data.items():
             if data.get("score", 0) == 0: continue
+
             if ticker in seen_tickers: continue
             seen_tickers.add(ticker)
+            
             score = data.get("score", 0)
             valid_signals.append((date_str, ticker, score, data))
+            
             for k, days_off in [("1d", 1), ("5d", 5), ("10d", 10), ("20d", 20)]:
                 m = get_market_ret(date_str, days_off) 
                 if m is not None:
                     stats_agg[k]["m_sum"] += m
                     stats_agg[k]["m_c"] += 1
+
                 r = data.get(f"ret_{k}")
                 if r is not None:
                     stats_agg[k]["s_sum"] += r
                     stats_agg[k]["s_c"] += 1
                     if r > 0: stats_agg[k]["w"] += 1
+
     embed = discord.Embed(title="回测统计", color=0x00BFFF)
+    
     def mk_field(key):
         d = stats_agg[key]
+        
         if d["s_c"] > 0:
             avg_stock = d["s_sum"] / d["s_c"]
             avg_stock_str = f"`{avg_stock:+.2f}%`"
             win_rate = f"`{d['w']/d['s_c']*100:.0f}%`"
-        else: avg_stock, avg_stock_str, win_rate = None, "Wait...", "-"
+        else:
+            avg_stock = None
+            avg_stock_str = "Wait..."
+            win_rate = "-"
+
         if d["m_c"] > 0:
             avg_market = d["m_sum"] / d["m_c"]
             avg_market_str = f"`{avg_market:+.2f}%`"
@@ -1230,18 +1250,39 @@ async def stats_command(interaction: discord.Interaction):
                         val = ((p_now - p_prev) / p_prev) * 100
                         avg_market = val
                         avg_market_str = f"`{val:+.2f}%`"
-                    else: avg_market, avg_market_str = None, "Wait..."
-                except: avg_market, avg_market_str = None, "Wait..."
-            else: avg_market, avg_market_str = None, "Wait..."
+                    else:
+                        avg_market = None
+                        avg_market_str = "Wait..."
+                except:
+                    avg_market = None
+                    avg_market_str = "Wait..."
+            else:
+                avg_market = None
+                avg_market_str = "Wait..."
+        
+        if avg_market is not None and isinstance(avg_market, float):
+            avg_market_str = f"`{avg_market:+.2f}%`"
+        else:
+            avg_market_str = "Wait..."
+
         if avg_stock is not None and avg_market is not None and isinstance(avg_market, float):
             diff = avg_stock - avg_market
             diff_str = f"**{diff:+.2f}%**"
-        else: diff_str = "-"
-        return f"个股平均: {avg_stock_str}\n纳指同期: {avg_market_str}\n超额收益: {diff_str}\n个股胜率: {win_rate}"
+        else:
+            diff_str = "-"
+        
+        return (
+            f"个股平均: {avg_stock_str}\n"
+            f"纳指同期: {avg_market_str}\n"
+            f"超额收益: {diff_str}\n"
+            f"个股胜率: {win_rate}"
+        )
+
     embed.add_field(name="1日表现", value=mk_field("1d"), inline=True)
     embed.add_field(name="5日表现", value=mk_field("5d"), inline=True)
     embed.add_field(name="10日表现", value=mk_field("10d"), inline=True)
     embed.add_field(name="20日表现", value=mk_field("20d"), inline=True)
+
     recent_list_str = []
     for date_str, ticker, score, data in valid_signals[:10]:
         r1 = data.get("ret_1d")
@@ -1252,37 +1293,56 @@ async def stats_command(interaction: discord.Interaction):
         r10_str = f"{r10:+.1f}%" if r10 is not None else "-"
         r20 = data.get("ret_20d")
         r20_str = f"{r20:+.1f}%" if r20 is not None else "-"
+        
         recent_list_str.append(f"`{date_str}` **{ticker}**\n└ 1D:`{r1_str}` 5D:`{r5_str}` 10D:`{r10_str}` 20D:`{r20_str}`")
-    if recent_list_str: embed.add_field(name="详细情况", value="\n".join(recent_list_str), inline=False)
-    else: embed.add_field(name="详细情况", value="无近期信号", inline=False)
+        
+    if recent_list_str:
+        embed.add_field(name="详细情况", value="\n".join(recent_list_str), inline=False)
+    else:
+        embed.add_field(name="详细情况", value="无近期信号", inline=False)
+        
     await interaction.followup.send(embed=embed)
 
 @client.tree.command(name="test", description="Test single stock")
 async def test_command(interaction: discord.Interaction, ticker: str):
     await interaction.response.defer()
     ticker = ticker.upper().strip()
+    
     logging.info(f"[TEST Command] Testing: {ticker}")
+
     data_map = await fetch_historical_batch([ticker])
     quotes_map = await fetch_realtime_quotes([ticker])
+    
     if not data_map or ticker not in data_map:
         await interaction.followup.send(f"Failed `{ticker}` (Check logs for 403/429 or data error)")
         return
+        
     df = data_map[ticker]
-    if ticker in quotes_map: df = await asyncio.to_thread(merge_and_recalc_sync, df, quotes_map[ticker])
+    if ticker in quotes_map:
+        df = await asyncio.to_thread(merge_and_recalc_sync, df, quotes_map[ticker])
+
     is_triggered, score, reason, r_l, s_l, anchor_idx = await check_signals(df)
+    
     price = df['close'].iloc[-1]
+    
     stop_loss, support = calculate_risk_levels(df)
-    if not reason: reason = f"无明显信号 (得分: {score})"
+
+    if not reason: 
+        reason = f"无明显信号 (得分: {score})"
+    
     chart_buf = await generate_chart(df, ticker, r_l, s_l, stop_loss, support, anchor_idx)
     filename = f"{ticker}_test.png"
+    
     embed = create_alert_embed(ticker, score, price, reason, stop_loss, support, df, filename)
+
     try:
         f = discord.File(chart_buf, filename=filename)
         await interaction.followup.send(embed=embed, file=f)
     except Exception as e:
         logging.error(f"Send Error: {e}")
         await interaction.followup.send(f"Failed to send image: {e}")
-    finally: chart_buf.close()
+    finally:
+        chart_buf.close()
 
 if __name__ == "__main__":
     if DISCORD_TOKEN: client.run(DISCORD_TOKEN)
