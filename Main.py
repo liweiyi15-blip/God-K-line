@@ -446,7 +446,7 @@ def identify_patterns(df):
     curr_idx = len(df) - 1
     t_start = df.index[vis_start_idx]
     t_end = df.index[curr_idx]
-     
+      
     # --- 1. 阻力线 (Resistance) ---
     if pivots_high:
         candidates_anchor = [p for p in pivots_high if p[2] < curr_idx - 15]
@@ -501,8 +501,8 @@ def identify_patterns(df):
                     subset_lows = df['low'].iloc[check_start:check_end+1].values
                     subset_indices = np.arange(check_start, check_end+1)
                     line_vals = m_sup * subset_indices + c_sup
-                    # 稍微放宽容错
-                    if np.any(subset_lows < line_vals * 0.97): is_valid_sup = False
+                    # [修改] 稍微放宽容错 从 0.97 改为 0.95
+                    if np.any(subset_lows < line_vals * 0.95): is_valid_sup = False
                 if is_valid_sup: best_sup_line = (m_sup, c_sup)
             if best_sup_line:
                 m_sup, c_sup = best_sup_line
@@ -677,7 +677,7 @@ async def check_signals(df):
 # -----------------------------------------------------------------------------
 def _generate_chart_sync(df, ticker, res_line=[], sup_line=[], stop_price=None, support_price=None, anchor_idx=None):
     buf = io.BytesIO()
-    
+      
     default_lookback = 100 
     start_idx = max(0, len(df) - default_lookback)
     if anchor_idx is not None: start_idx = max(0, anchor_idx - 30) 
@@ -706,7 +706,7 @@ def _generate_chart_sync(df, ticker, res_line=[], sup_line=[], stop_price=None, 
     else:
         vol_bull, vol_bear, bin_centers, bar_height = [], [], [], 0
 
-    total_len = len(plot_df)            
+    total_len = len(plot_df)             
     if stop_price is None: stop_price = df['close'].iloc[-1] * 0.95
     if support_price is None: support_price = df['close'].iloc[-1] * 0.90
     stop_line_data = [stop_price] * total_len
@@ -751,10 +751,12 @@ def _generate_chart_sync(df, ticker, res_line=[], sup_line=[], stop_price=None, 
     # [修改] 底部成交量单色且无边框
     volume_color = '#3b404e'
     
-    # [FIXED HERE: Removing duplicate 'edge' argument]
+    # [修改] 强制 vcedge 与 volume 颜色一致，消除边框
     my_marketcolors = mpf.make_marketcolors(
-        up='#089981', down='#f23645', edge='inherit', wick='inherit', 
+        up='#089981', down='#f23645', 
+        edge='inherit', wick='inherit', 
         volume=volume_color, 
+        vcedge={'up':volume_color, 'down':volume_color}, # 强制去除成交量边框
         ohlc='inherit'
     )
     
@@ -773,16 +775,16 @@ def _generate_chart_sync(df, ticker, res_line=[], sup_line=[], stop_price=None, 
         }
     )
 
-    # [修改] Nx 结构实心填充 (透明度 0.1, 边框移除)
+    # [修改] Nx 结构实心填充 (透明度 0.1, 边框移除 linewidth=0)
     fill_between_config = [
-        dict(y1=plot_df['Nx_Blue_UP'].values, y2=plot_df['Nx_Blue_DW'].values, color='dodgerblue', alpha=0.1),
-        dict(y1=plot_df['Nx_Yellow_UP'].values, y2=plot_df['Nx_Yellow_DW'].values, color='gold', alpha=0.1)
+        dict(y1=plot_df['Nx_Blue_UP'].values, y2=plot_df['Nx_Blue_DW'].values, color='dodgerblue', alpha=0.1, linewidth=0),
+        dict(y1=plot_df['Nx_Yellow_UP'].values, y2=plot_df['Nx_Yellow_DW'].values, color='gold', alpha=0.1, linewidth=0)
     ]
 
     add_plots = [
-        # [修改] 布林中轨加粗 (0.9)
+        # [修改] 布林中轨加粗 (0.6)
         mpf.make_addplot(plot_df['BB_Up'], color='#9370DB', linestyle=':', width=0.6, alpha=0.5),
-        mpf.make_addplot(plot_df['BB_Mid'], color='#9370DB', linestyle=':', width=0.9, alpha=0.7), # Thicker mid
+        mpf.make_addplot(plot_df['BB_Mid'], color='#9370DB', linestyle=':', width=0.6, alpha=0.7), # 改为0.6
         mpf.make_addplot(plot_df['BB_Low'], color='#9370DB', linestyle=':', width=0.6, alpha=0.5),
         mpf.make_addplot(stop_line_data, color='red', linestyle='--', width=0.8, alpha=0.6), 
         mpf.make_addplot(supp_line_data, color='green', linestyle=':', width=0.8, alpha=0.6), 
@@ -796,7 +798,8 @@ def _generate_chart_sync(df, ticker, res_line=[], sup_line=[], stop_price=None, 
 
     kwargs = dict(
         type='candle', style=my_style, 
-        title=dict(title=f"{ticker} Analysis", color='white', fontsize=14, weight='bold'),
+        # [修改] 移除默认标题
+        # title=dict(title=f"{ticker} Analysis", color='white', fontsize=14, weight='bold'),
         ylabel='', addplot=add_plots, 
         volume=True, volume_panel=1, panel_ratios=(3, 1),
         tight_layout=True, datetime_format='%m-%d', xrotation=0, figsize=(10, 6),
@@ -806,26 +809,32 @@ def _generate_chart_sync(df, ticker, res_line=[], sup_line=[], stop_price=None, 
     )
       
     if seq_of_points:
-        # [修改] 旗形线细度 0.3
+        # [修改] 旗形线细度 0.1
         kwargs['alines'] = dict(
             alines=seq_of_points,
-            colors='white', linewidths=0.3, linestyle='-', alpha=1.0 
+            colors='white', linewidths=0.1, linestyle='-', alpha=1.0 
         )
       
     try:
         fig, axlist = mpf.plot(plot_df, **kwargs)
         ax_main = axlist[0]
         
-        # --- 绘制右侧 Volume Profile (透明度 0.05) ---
+        # [新增] 中心大标题 (水印风格)
+        ax_main.text(0.5, 0.5, ticker, 
+            transform=ax_main.transAxes, 
+            fontsize=60, color='white', alpha=0.1, 
+            ha='center', va='center', weight='bold', zorder=0)
+
+        # --- 绘制右侧 Volume Profile (透明度 0.1) ---
         if not valid_df.empty:
             ax_vp = ax_main.twiny()
             max_vol = max(vol_bull.max(), vol_bear.max()) if len(vol_bull) > 0 else 1
             ax_vp.set_xlim(0, max_vol * 4) 
             ax_vp.invert_xaxis() 
             
-            # [修改] alpha=0.05
-            ax_vp.barh(bin_centers, vol_bear, height=bar_height, color='#f23645', alpha=0.05, align='center', zorder=0)
-            ax_vp.barh(bin_centers, vol_bull, height=bar_height, color='#089981', alpha=0.05, align='center', left=vol_bear, zorder=0)
+            # [修改] alpha=0.1
+            ax_vp.barh(bin_centers, vol_bear, height=bar_height, color='#f23645', alpha=0.1, align='center', zorder=0)
+            ax_vp.barh(bin_centers, vol_bull, height=bar_height, color='#089981', alpha=0.1, align='center', left=vol_bear, zorder=0)
             ax_vp.axis('off')
 
         fig.savefig(buf, format='png', bbox_inches='tight', pad_inches=0.1, dpi=150)
