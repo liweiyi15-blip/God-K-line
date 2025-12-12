@@ -687,7 +687,7 @@ def identify_patterns(df):
                                 # 防止假突破太远 (5%以内)
                                 if curr_price < res_today * 1.05:
                                     pattern_name = "形态突破 (旗形/楔形)"
-                                                            
+                                                                    
     return pattern_name, res_line, sup_line
 
 def detect_candle_patterns(df):
@@ -973,22 +973,48 @@ def _generate_chart_sync(df, ticker, res_line=[], sup_line=[], stop_price=None, 
         mpf.make_addplot(plot_df['DIF'], panel=2, color='orange'),
         mpf.make_addplot(plot_df['DEA'], panel=2, color='blue'),
     ]
-      
-    kwargs = dict(type='candle', style=my_style, title=f"{ticker} Analysis", ylabel='Price', addplot=add_plots, volume=True, panel_ratios=(6, 2, 2), tight_layout=True, savefig=dict(fname=buf, format='png', bbox_inches='tight', pad_inches=0))
-      
-    # --- [修改] 趋势线样式配置 ---
-    alines_config = []
     
-    # 阻力线 (Resistance): 蓝色实线，醒目
+    # --- 1. 准备趋势线 (alines) ---
+    # 改回灰色虚线，解决报错问题
+    seq_of_points = []
+    
     if res_line:
-        alines_config.append(dict(alines=res_line, colors='deepskyblue', linewidths=2.0, linestyle='-'))
-        
-    # 支撑线 (Support): 深灰色实线，低调
+        # res_line 结构是 [[(d1, p1), (d2, p2)]]
+        for line in res_line:
+            # 确保将 numpy 类型转换为原生 float，防止 validator 报错
+            p1 = (line[0][0], float(line[0][1]))
+            p2 = (line[1][0], float(line[1][1]))
+            seq_of_points.append([p1, p2])
+    
     if sup_line:
-        alines_config.append(dict(alines=sup_line, colors='dimgray', linewidths=1.5, linestyle='-'))
-        
-    if alines_config:
-        kwargs['alines'] = alines_config
+        for line in sup_line:
+            p1 = (line[0][0], float(line[0][1]))
+            p2 = (line[1][0], float(line[1][1]))
+            seq_of_points.append([p1, p2])
+      
+    kwargs = dict(
+        type='candle', 
+        style=my_style, 
+        title=f"{ticker} Analysis", 
+        ylabel='Price', 
+        addplot=add_plots, 
+        volume=True, 
+        panel_ratios=(6, 2, 2), 
+        tight_layout=True, 
+        datetime_format='%Y%m%d', # <--- 修改点：时间格式改为紧凑的 YYYYMMDD
+        xrotation=0,              # <--- 修改点：日期不旋转，进一步利用空间
+        savefig=dict(fname=buf, format='png', bbox_inches='tight', pad_inches=0)
+    )
+      
+    # 添加趋势线 (如果有) - 统一设置为灰色虚线
+    if seq_of_points:
+        kwargs['alines'] = dict(
+            alines=seq_of_points,
+            colors='gray',         # <--- 还原：灰色
+            linestyle='--',        # <--- 还原：虚线
+            linewidths=1.5,
+            alpha=0.8
+        )
       
     try:
         mpf.plot(plot_df, **kwargs)
