@@ -566,10 +566,58 @@ def detect_candle_patterns(df):
     return patterns
 
 def get_volume_projection_factor(ny_now, minutes_elapsed):
-    TOTAL_MINUTES = 390
-    if minutes_elapsed <= 10: return 13.0
-    elif minutes_elapsed <= 60: return 13.0 - (13.0 - 8.0) * (minutes_elapsed - 10) / 50
-    else: return 8.0 - (8.0 - 4.0) * (minutes_elapsed - 60) / (TOTAL_MINUTES - 60)
+    """
+    根据美股成交量"U型曲线"（Smile Curve）修正后的推算因子。
+    原线性推算导致早盘量比虚高约 4 倍。
+    """
+    TOTAL_MINUTES = 390.0
+    
+    # 1. 盘前/刚开盘 (防止除以0或极小值)
+    if minutes_elapsed < 1: 
+        return 1.0 # 刚开盘不预测，直接用当前量，避免天文数字
+
+    # 2. 计算"时间进度" (0.0 ~ 1.0)
+    progress = minutes_elapsed / TOTAL_MINUTES
+
+    # 3. 修正逻辑：
+    # 美股开盘前30分钟通常完成全天 15%-20% 的量。
+    # 如果线性推算：30分钟(1/13) -> 乘以 13。
+    # 实际情况：30分钟已完成 20% -> 应该乘以 5。
+    # 差距正好是 13/5 ≈ 2.6倍，考虑到爆发股可能更集中，除以 3-4 是合理的。
+    
+    # 我们不直接乘倍数，而是根据"已完成的平均进度"来倒推全天
+    # 假设的累积成交量曲线 (估算值):
+    # 30m (7.7%时间) -> 完成 20% 量
+    # 60m (15%时间)  -> 完成 30% 量
+    # 195m (50%时间) -> 完成 60% 量 (中午比较平淡)
+    
+    estimated_completion = 0.0
+    
+    if minutes_elapsed <= 30:
+        # 开盘30分钟：极速完成。从 0% 到 20%
+        # 进度 = 分钟数 / 30 * 0.20
+        estimated_completion = (minutes_elapsed / 30.0) * 0.20
+    elif minutes_elapsed <= 60:
+        # 30-60分钟：稍微放缓。从 20% 到 30%
+        estimated_completion = 0.20 + ((minutes_elapsed - 30) / 30.0) * 0.10
+    elif minutes_elapsed <= 360:
+        # 中午漫长的300分钟：从 30% 走到 90% (线性增长，较慢)
+        estimated_completion = 0.30 + ((minutes_elapsed - 60) / 300.0) * 0.60
+    else:
+        # 尾盘30分钟：最后冲刺。从 90% 到 100%
+        estimated_completion = 0.90 + ((minutes_elapsed - 360) / 30.0) * 0.10
+        
+    # 4. 计算推算因子
+    # 因子 = 1 / 预估完成度
+    # 例如：开盘30分钟，完成20%(0.2)，因子 = 1/0.2 = 5.0 (比原来的13.0低了很多)
+    
+    if estimated_completion <= 0.01: return 1.0 # 保护
+    
+    factor = 1.0 / estimated_completion
+    
+    # 5. 针对你提到的"高了4倍"，我们做一个额外的平滑修正
+    # 如果觉得 5.0 还是高，可以根据 ATR 或 波动率进一步压缩，这里先直接返回
+    return factor
 
 def calculate_risk_levels(df):
     curr_close = df['close'].iloc[-1]
@@ -613,15 +661,25 @@ def check_signals_sync(df):
     is_volume_ok = False
     proj_vol_final = curr['volume']
     if is_open_market:
-        if minutes_elapsed < 30: is_volume_ok = True 
+        if minutes_elapsed < 5: # 开盘前5分钟波动太剧烈，暂时不看量比，或者给一个固定低值
+             is_volume_ok = True 
+             proj_vol_final = curr['volume'] # 不预测
         else:
             proj_factor = get_volume_projection_factor(ny_now, max(minutes_elapsed, 1))
-            trend_modifier = 1 - (min(curr['ADX'], 40) - 20) / 200 
-            proj_factor *= max(0.8, trend_modifier)
+            
+            # [移除] 之前那个 trend_modifier 可能会让计算变得不可控，先去掉，保持简单
+            # trend_modifier = 1 - (min(curr['ADX'], 40) - 20) / 200 
+            # proj_factor *= max(0.8, trend_modifier)
+            
             proj_vol_final = curr['volume'] * proj_factor
-            if proj_vol_final >= curr['Vol_MA20'] * CONFIG["filter"]["min_vol_ratio"]: is_volume_ok = True
+            
+            # 只有在量比 > 1.15 时才算合格
+            if proj_vol_final >= curr['Vol_MA20'] * CONFIG["filter"]["min_vol_ratio"]: 
+                is_volume_ok = True
     else:
-        if curr['volume'] >= curr['Vol_MA20'] * CONFIG["filter"]["min_vol_ratio"]: is_volume_ok = True
+        # 盘前盘后/收盘，直接对比
+        if curr['volume'] >= curr['Vol_MA20'] * CONFIG["filter"]["min_vol_ratio"]: 
+            is_volume_ok = True
     if not is_volume_ok: violations.append("过滤器: 量能不足")
 
     if proj_vol_final > curr['Vol_MA20'] * params["heavy_vol_multiplier"]: score += weights["HEAVY_VOLUME"]
