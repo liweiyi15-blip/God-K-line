@@ -55,45 +55,27 @@ CONFIG = {
     # -------------------------------------------------------------------------
     "filter": {
         # [防追高] 60日涨幅限制
-        # 含义：当前价格不能超过 (过去60天最低价 * 1.3)。
         "max_60d_gain": 0.3,
 
         # [防过热] RSI 超买限制
-        # 含义：RSI(14) 指标不能超过 60。
         "max_rsi": 60,
 
         # [防回落] 乖离率限制
-        # 含义：现价不能比 50日均线 (MA50) 高出 20%。
         "max_bias_50": 0.20,
 
         # [防抛压] 上影线限制
-        # 含义：上影线长度不能超过 K线总长度的 40%。
         "max_upper_shadow": 0.4,
 
         # [防疯牛/妖股] 单日波动限制
-        # 含义：当天涨跌幅绝对值不能超过 70%。
         "max_day_change": 0.7,
 
         # [资金门槛] 量比阈值
-        # 含义：当前成交量(或预估量) 必须是 20日均量 的 1.15倍以上。
         "min_vol_ratio": 1.15,
         
         # --- 布林带挤压 (BB Squeeze) 策略参数 ---
-        
-        # [蓄势条件] 极度压缩阈值
-        # 含义：昨日的布林带带宽 (Bandwidth) 必须小于 8%。
         "min_bb_squeeze_width": 0.08,
-
-        # [启动条件] 开口扩张阈值
-        # 含义：今日的布林带带宽必须扩大到 9.5% 以上。
         "min_bb_expand_width": 0.095,
-
-        # [抄底位置] 底部位置分位数
-        # 含义：当前价格必须处于过去60天价格区间的 30% 分位以下。
         "max_bottom_pos": 0.30,
-        
-        # [趋势潜能] ADX 活跃度
-        # 含义：ADX (趋势强度) 必须大于 15。
         "min_adx_for_squeeze": 15
     },
 
@@ -102,8 +84,6 @@ CONFIG = {
     # -------------------------------------------------------------------------
     "pattern": {
         # [关键] 枢轴点窗口 (Pivot Window)
-        # 数值 10：意味着这个点必须是前后10天(共21天)内的最高点，才能被连线。
-        # 作用：数值越大，画出的趋势线越跨越长周期（大级别），过滤掉小杂波。
         "pivot_window": 10
     },
 
@@ -118,7 +98,6 @@ CONFIG = {
         "max_charts_per_scan": 5,
 
         # [数据源] 历史数据回溯天数
-        # 原因：为了画出一年前的大级别形态（如ADBE），必须请求足够长的数据。
         "history_days": 300
     },
 
@@ -131,59 +110,29 @@ CONFIG = {
 
         # [新增] 策略参数表：这里控制触发得分的具体条件
         "PARAMS": {
-            # 1. 巨量 (HEAVY_VOLUME)
-            # 含义：当前成交量是 20日均量 的多少倍才算巨量？
             "heavy_vol_multiplier": 1.55, 
-
-            # 2. 强趋势 (STRONG_ADX)
-            # 含义：ADX 大于多少才算强趋势？
             "adx_strong_threshold": 25,
-
-            # 3. 趋势激活 (ADX_ACTIVATION)
-            # 含义：之前的 ADX 必须小于多少（代表盘整），现在拐头向上才算激活？
             "adx_activation_lower": 20,
-
-            # 4. KDJ 反击 (KDJ_REBOUND)
-            # 含义：昨天的 J 线必须小于多少（超卖），今天金叉才给分？
             "kdj_j_oversold": 0,
-
-            # 5. MACD 底背离 (MACD_DIVERGE)
-            # 含义：股价必须接近过去20天最低价的多少范围？(1.02 = 2%以内)
             "divergence_price_tolerance": 1.02,
-            # 含义：当前 MACD 值必须高于过去最低 MACD 的多少？(0.8 = 只要不比最低点低太多就行，或者比最低点高)
             "divergence_macd_strength": 0.8,
-
-            # 6. OBV 资金流 (OBV_TREND_UP)
-            # 含义：比较当前 OBV 和多少天前的 OBV？(确认近期是在流入)
             "obv_lookback": 5,
-
-            # 7. 抛售高潮 (CAPITULATION)
-            # 含义：量能必须大于均量的多少倍？
             "capitulation_vol_mult": 2,
-            # 含义：下影线比例必须大于多少？(0.5 = 下影线占K线一半以上)
             "capitulation_pinbar": 0.5,
-            # 含义：市值小于多少才算小盘股容易被操纵？(50亿)
             "capitulation_mcap": 5_000_000_000
         },
 
         # [加分项] 分值权重
         "WEIGHTS": {
-            # --- 第一梯队：最强信号 ---
             "PATTERN_BREAK": 40,   # 形态突破
             "NX_BREAKOUT": 35,     # 均线突破
             "BB_SQUEEZE": 30,      # 布林挤压
-
-            # --- 第二梯队：趋势确认 ---
             "GOD_TIER_NX": 20,     # 回踩支撑
             "STRONG_ADX": 20,      # 强趋势
             "ADX_ACTIVATION": 20,  # 趋势激活
-
-            # --- 第三梯队：辅助验证 ---
             "OBV_TREND_UP": 15,    # 资金流入
             "CAPITULATION": 12,    # 抛售高潮
             "HEAVY_VOLUME": 10,    # 巨量
-
-            # --- 第四梯队：常规指标 ---
             "MACD_ZERO_CROSS": 10, 
             "MACD_DIVERGE": 10,    
             "KDJ_REBOUND": 8,      
@@ -967,21 +916,42 @@ def _generate_chart_sync(df, ticker, res_line=[], sup_line=[], stop_price=None, 
     stop_line_data = [stop_price] * total_len
     supp_line_data = [support_price] * total_len
 
-    # --- 4. 裁剪趋势线 ---
+    # --- 4. 裁剪趋势线 (修复报错逻辑) ---
     def clip_line_segments(segments):
         new_segments = []
         if not segments: return new_segments
+        
+        # 获取图表起始时间戳
         plot_start_date = plot_df.index[0]
+        plot_start_ts = plot_start_date.timestamp()
         
         for seg in segments:
             d1, p1 = seg[0]
             d2, p2 = seg[1]
-            if d2 < plot_start_date: continue
-            if d1 < plot_start_date:
+            
+            d1_ts = d1.timestamp()
+            d2_ts = d2.timestamp()
+            
+            # 如果整条线都在左边界左边，丢弃
+            if d2_ts < plot_start_ts:
+                continue
+            
+            # 如果线段的起点在左边界左边，需要裁剪
+            if d1_ts < plot_start_ts:
                 try:
-                    new_segments.append(seg) 
-                except: continue
+                    # 计算斜率 slope = (y2 - y1) / (x2 - x1)
+                    if d2_ts - d1_ts == 0: continue
+                    slope = (p2 - p1) / (d2_ts - d1_ts)
+                    
+                    # 计算图表左边界处的新价格: y = y1 + slope * (x_new - x1)
+                    new_p1 = p1 + slope * (plot_start_ts - d1_ts)
+                    
+                    # 添加裁剪后的新线段
+                    new_segments.append([(plot_start_date, new_p1), (d2, p2)])
+                except: 
+                    continue
             else:
+                # 起点在范围内，无需裁剪
                 new_segments.append(seg)
         return new_segments
 
