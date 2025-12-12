@@ -561,14 +561,16 @@ def find_pivots(df, window=10):
     return pivots_high, pivots_low
 
 # [核心修复] 重写形态识别算法：改为“外切线”逻辑，确保不切穿中间价格
+# [修改] 增加返回值 min_anchor_idx
 def identify_patterns(df):
-    if len(df) < 60: return None, [], []
+    if len(df) < 60: return None, [], [], None
     
     # 获取所有高低点 Pivot
     pivots_high, pivots_low = find_pivots(df, window=5) # 稍微缩小窗口以捕捉更多细节点
     
     res_line, sup_line = [], []
     pattern_name = None
+    min_anchor_idx = None # [新增] 用于记录最早的锚点位置
     
     # 视野起点
     vis_start_idx = max(0, len(df) - 250)
@@ -642,6 +644,10 @@ def identify_patterns(df):
                 
                 res_line = [[(t_start, p_start), (t_end, p_end)]]
                 
+                # [新增] 更新 min_anchor_idx
+                if min_anchor_idx is None or idx_1 < min_anchor_idx:
+                    min_anchor_idx = idx_1
+
                 # --- 检测突破 ---
                 curr_price = df['close'].iloc[-1]
                 # 突破必须是当前价格高于线
@@ -684,8 +690,12 @@ def identify_patterns(df):
                 lp_start = m_sup * vis_start_idx + c_sup
                 lp_end = m_sup * curr_idx + c_sup
                 sup_line = [[(t_start, lp_start), (t_end, lp_end)]]
+                
+                # [新增] 更新 min_anchor_idx
+                if min_anchor_idx is None or lx1 < min_anchor_idx:
+                    min_anchor_idx = lx1
 
-    return pattern_name, res_line, sup_line
+    return pattern_name, res_line, sup_line, min_anchor_idx
 
 def detect_candle_patterns(df):
     if len(df) < 5: return []
@@ -743,14 +753,15 @@ def calculate_risk_levels(df):
     return stop_loss, support
 
 # --- 核心信号检查函数 ---
+# [修改] 增加返回值 anchor_idx
 def check_signals_sync(df):
-    if len(df) < 60: return False, 0, "数据不足", [], []
+    if len(df) < 60: return False, 0, "数据不足", [], [], None
       
     last_date = df.index[-1].date()
     today_date = datetime.now(MARKET_TIMEZONE).date()
       
     if (today_date - last_date).days > 4:
-        return False, 0, f"DATA_STALE: 数据严重滞后 ({last_date})", [], []
+        return False, 0, f"DATA_STALE: 数据严重滞后 ({last_date})", [], [], None
 
     curr = df.iloc[-1]
     prev = df.iloc[-2]
@@ -861,7 +872,8 @@ def check_signals_sync(df):
         triggers.append("Nx 结构: 蓝梯回踩确认")
         score += weights["GOD_TIER_NX"] 
 
-    pattern_name, res_line, sup_line = identify_patterns(df)
+    # [修改] 接收 min_anchor_idx
+    pattern_name, res_line, sup_line, anchor_idx = identify_patterns(df)
     if pattern_name:
         triggers.append(pattern_name)
         score += weights["PATTERN_BREAK"]
@@ -914,12 +926,13 @@ def check_signals_sync(df):
     final_reason_parts = triggers + violations
     final_reason = "\n".join(final_reason_parts) if final_reason_parts else "无明显信号"
 
-    return is_triggered, score, final_reason, res_line, sup_line
+    return is_triggered, score, final_reason, res_line, sup_line, anchor_idx
 
 async def check_signals(df):
     return await asyncio.to_thread(check_signals_sync, df)
 
-def _generate_chart_sync(df, ticker, res_line=[], sup_line=[], stop_price=None, support_price=None):
+# [修改] 增加参数 anchor_idx
+def _generate_chart_sync(df, ticker, res_line=[], sup_line=[], stop_price=None, support_price=None, anchor_idx=None):
     buf = io.BytesIO()
       
     last_close = df['close'].iloc[-1]
@@ -935,22 +948,10 @@ def _generate_chart_sync(df, ticker, res_line=[], sup_line=[], stop_price=None, 
     default_lookback = 80
     start_idx = max(0, len(df) - default_lookback)
       
-    all_lines_for_zoom = (res_line or []) + (sup_line or [])
-    min_line_date = None
-      
-    if all_lines_for_zoom:
-        # 1. 提取所有线的起点日期
-        start_dates = [line[0][0] for line in all_lines_for_zoom]
-        if start_dates:
-            min_line_date = min(start_dates)
-            
-            # 2. 找到该日期在 dataframe 中的索引位置
-            # 使用 mask 查找第一个 >= min_line_date 的索引
-            mask = df.index >= min_line_date
-            if mask.any():
-                first_point_idx = mask.argmax()
-                # 3. 往左推 20 个交易日
-                start_idx = max(0, first_point_idx - 20)
+    # 如果有确切的锚点（形态的真实起点），优先使用它来定位左边界
+    if anchor_idx is not None:
+        # 从锚点往左推 20 个交易日
+        start_idx = max(0, anchor_idx - 20)
 
     plot_df = df.iloc[start_idx:]
       
@@ -1021,8 +1022,9 @@ def _generate_chart_sync(df, ticker, res_line=[], sup_line=[], stop_price=None, 
         
     return buf
 
-async def generate_chart(df, ticker, res_line=[], sup_line=[], stop_price=None, support_price=None):
-    return await asyncio.to_thread(_generate_chart_sync, df, ticker, res_line, sup_line, stop_price, support_price)
+# [修改] 增加参数 anchor_idx
+async def generate_chart(df, ticker, res_line=[], sup_line=[], stop_price=None, support_price=None, anchor_idx=None):
+    return await asyncio.to_thread(_generate_chart_sync, df, ticker, res_line, sup_line, stop_price, support_price, anchor_idx)
 
 async def update_stats_data():
     if "signal_history" not in settings: return
@@ -1366,7 +1368,8 @@ class StockBotClient(discord.Client):
                     last_signal_score = history[past_date][ticker].get("score", 0)
                     in_cooldown = True 
             
-            is_triggered, score, reason, res_line, sup_line = await check_signals(df)
+            # [修改] 解包 min_anchor_idx
+            is_triggered, score, reason, res_line, sup_line, anchor_idx = await check_signals(df)
             
             today_signal_data = settings["signal_history"][today_str].get(ticker)
             if today_signal_data:
@@ -1396,6 +1399,7 @@ class StockBotClient(discord.Client):
                     "df": df,
                     "res_line": res_line,
                     "sup_line": sup_line,
+                    "anchor_idx": anchor_idx, # [新增] 保存 anchor_idx
                     "users": users_to_ping
                 }
                 alerts_buffer.append(alert_obj)
@@ -1430,9 +1434,10 @@ class StockBotClient(discord.Client):
                 mentions = " ".join([f"<@{uid}>" for uid in users])
                 
                 if sent_charts < max_charts:
+                    # [修改] 传递 anchor_idx
                     chart_buf = await generate_chart(
                         alert["df"], ticker, alert["res_line"], alert["sup_line"], 
-                        alert["stop_loss"], alert["support"]
+                        alert["stop_loss"], alert["support"], alert["anchor_idx"]
                     )
                     filename = f"{ticker}.png"
                     
@@ -1691,7 +1696,8 @@ async def test_command(interaction: discord.Interaction, ticker: str):
     if ticker in quotes_map:
         df = await asyncio.to_thread(merge_and_recalc_sync, df, quotes_map[ticker])
 
-    is_triggered, score, reason, r_l, s_l = await check_signals(df)
+    # [修改] 解包 anchor_idx
+    is_triggered, score, reason, r_l, s_l, anchor_idx = await check_signals(df)
     
     price = df['close'].iloc[-1]
     
@@ -1700,7 +1706,8 @@ async def test_command(interaction: discord.Interaction, ticker: str):
     if not reason: 
         reason = f"无明显信号 (得分: {score})"
     
-    chart_buf = await generate_chart(df, ticker, r_l, s_l, stop_loss, support)
+    # [修改] 传递 anchor_idx
+    chart_buf = await generate_chart(df, ticker, r_l, s_l, stop_loss, support, anchor_idx)
     filename = f"{ticker}_test.png"
     
     embed = create_alert_embed(ticker, score, price, reason, stop_loss, support, df, filename)
