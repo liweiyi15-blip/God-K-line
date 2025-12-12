@@ -133,7 +133,7 @@ CONFIG = {
         "PARAMS": {
             # 1. 巨量 (HEAVY_VOLUME)
             # 含义：当前成交量是 20日均量 的多少倍才算巨量？
-            "heavy_vol_multiplier": 2.0, 
+            "heavy_vol_multiplier": 1.4, 
 
             # 2. 强趋势 (STRONG_ADX)
             # 含义：ADX 大于多少才算强趋势？
@@ -159,7 +159,7 @@ CONFIG = {
 
             # 7. 抛售高潮 (CAPITULATION)
             # 含义：量能必须大于均量的多少倍？
-            "capitulation_vol_mult": 2.5,
+            "capitulation_vol_mult": 2,
             # 含义：下影线比例必须大于多少？(0.5 = 下影线占K线一半以上)
             "capitulation_pinbar": 0.5,
             # 含义：市值小于多少才算小盘股容易被操纵？(50亿)
