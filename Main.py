@@ -48,140 +48,45 @@ TIME_MARKET_OPEN = time(9, 30)
 TIME_MARKET_SCAN_START = time(10, 0) # 10点才开始报
 TIME_MARKET_CLOSE = time(16, 0)
 
-# --- 核心策略配置 (优化版：防追高，抓启动，资金验证) ---
+# --- 核心策略配置 ---
 CONFIG = {
     "filter": {
-        # [防追高] 60日涨幅限制
-        # 逻辑：当前收盘价不能超过 (过去60天最低价 * 1.3)。
-        # 作用：剔除那些短期已经涨了30%以上的股票，防止去做别人的接盘侠。
         "max_60d_gain": 0.3,
-
-        # [防过热] RSI 超买限制
-        # 逻辑：RSI(14) 指标不能超过 55。
-        # 作用：RSI超过55-70通常意味着短线过热，回调风险大。我们只做刚启动的，不做已经热过头的。
         "max_rsi": 55,
-
-        # [防偏离] 乖离率限制
-        # 逻辑：现价不能比 50日均线 (MA50) 高出 20%。
-        # 作用：股价像橡皮筋，离均线太远会被拉回来。限制这个能避免买在“冲高回落”的前夜。
         "max_bias_50": 0.20,
-
-        # [防抛压] 上影线限制
-        # 逻辑：上影线长度不能超过 K线总长度的 40%。
-        # 作用：长上影线（避雷针）说明上方卖盘压力巨大，这种票冲上去容易被打下来，要过滤。
         "max_upper_shadow": 0.4,
-
-        # [防疯牛] 单日涨幅限制
-        # 逻辑：当天涨幅不能超过 7%。
-        # 作用：防止追进已经被爆炒的妖股，风险不可控。
         "max_day_change": 0.7,
-
-        # [能量门槛] 量比阈值
-        # 逻辑：(预测)成交量 必须是 20日均量 的 1.3倍以上。
-        # 作用：无量不突破。确保当前是有资金关注的，不是散户自娱自乐。
         "min_vol_ratio": 1.3,
-        
-        # --- [核心] 布林带(BB Squeeze) 相关参数 ---
-        
-        # [蓄势条件] 挤压阈值 (昨日)
-        # 逻辑：昨天的布林带带宽 (Width) 必须小于 0.08 (8%)。
-        # 作用：寻找那些长期横盘、波动极小、像压缩弹簧一样的股票。数值越小，盘整越极致。
         "min_bb_squeeze_width": 0.08,
-
-        # [启动条件] 扩张阈值 (今日)
-        # 逻辑：今天的布林带带宽必须扩大到 0.095 (9.5%) 以上。
-        # 作用：确认“弹簧弹开了”。必须配合上面的 0.08 使用，代表从“极静”转为“启动”。
         "min_bb_expand_width": 0.095,
-
-        # [位置条件] 底部位置阈值
-        # 逻辑：当前价格处于过去60天价格区间的 30% 分位以下。
-        # 作用：(现价-最低价)/(最高价-最低价) <= 0.3。确保我们是在底部抄底，而不是在半山腰接飞刀。
         "max_bottom_pos": 0.30,
-        
-        # [趋势潜能] ADX 门槛
-        # 逻辑：ADX 必须大于 15。
-        # 作用：防止选到那种彻底没人玩的“死股”。即使在盘整，内部也要有一定的动能。
         "min_adx_for_squeeze": 15
     },
-
     "pattern": {
-        # [形态识别] 枢轴点窗口
-        # 作用：识别阻力线和支撑线时，往前和往后看 5 天来确定高低点。5 是周线级别的经典参数。
-        "pivot_window": 5
+        "pivot_window": 10  # [修改] 增加窗口大小以过滤噪点
     },
-
     "system": {
-        # [防刷屏] 冷却时间
-        # 作用：一只股票报警后，3天内不再报警。防止同一只票天天响。
         "cooldown_days": 3,
-
-        # [防拥堵] 每次扫描最大发图数
-        # 作用：每次扫描最多发 5 张图，避免Discord频道被刷屏。
         "max_charts_per_scan": 5,
-
-        # [数据源] 获取历史数据长度
-        # 作用：向 API 请求过去 400 天的数据，保证均线计算准确。
-        "history_days": 400
+        "history_days": 400 # 保证有足够的数据回溯 250 天
     },
-
     "SCORE": { 
-        # [及格线] 最低报警分数
-        # 作用：总分低于 70 分的股票，即使满足过滤条件也不报警。
         "MIN_ALERT_SCORE": 70, 
-
-        # --- [打分权重系统] ---
         "WEIGHTS": {
-            # 1. 形态突破 (40分)
-            # 含义：突破了前期画出的阻力线趋势线。最强的买入信号之一。
             "PATTERN_BREAK": 40,
-
-            # 2. Nx 突破 (35分)
-            # 含义：收盘价站上了 Nx 蓝色均线系统。代表趋势转多。
             "NX_BREAKOUT": 35,
-
-            # 3. 布林带挤压启动 (30分) [核心策略]
-            # 含义：满足上面的 BB Squeeze 逻辑 (低位+挤压+开口)。这是你目前的主策略。
             "BB_SQUEEZE": 30,
-
-            # 4. 蓝梯回踩 (20分)
-            # 含义：上涨途中的回调，踩稳了蓝线支撑。属于“上车机会”。
             "GOD_TIER_NX": 20,
-
-            # 5. 强趋势 ADX (20分)
-            # 含义：ADX>25 且 PDI>MDI。代表正处于主升浪中。
             "STRONG_ADX": 20,
-            
-            # 6. 趋势激活 (20分)
-            # 含义：ADX 结束盘整，刚刚拐头向上。代表行情刚点火。
             "ADX_ACTIVATION": 20,
-
-            # 7. OBV 资金验证 (15分) [新加入]
-            # 含义：OBV 处于上升趋势 (大于20日均线) 且近期在流入。用于弥补量比预测的不准。
             "OBV_TREND_UP": 15,
-
-            # 8. 抛售高潮 (12分)
-            # 含义：跌破布林下轨+巨量+长下影。代表恐慌盘涌出，可能是绝佳的超跌反弹点。
             "CAPITULATION": 12,
-
-            # 9. 巨量 (10分)
-            # 含义：成交量是均量的2倍以上。
             "HEAVY_VOLUME": 10,
-
-            # 10. MACD 金叉 / 底背离 (10分)
-            # 含义：经典的指标信号。
             "MACD_ZERO_CROSS": 10,
             "MACD_DIVERGE": 10,
-
-            # 11. KDJ 反击 (8分)
-            # 含义：J线触底反弹。
             "KDJ_REBOUND": 8,            
-
-            # 12. K线形态 (5分)
-            # 含义：出现早晨之星、吞没形态等。作为辅助加分。
             "CANDLE_PATTERN": 5
         },
-        
-        # [评级标签] 根据分数给出的 Emoji
         "EMOJI": { 
             100: "TOP", 90: "HIGH", 80: "MID", 70: "LOW", 60: "TEST"
         }
@@ -326,11 +231,9 @@ def calculate_nx_indicators(df):
     upper_shadow = np.where(df['close'] >= df['open'], df['high'] - df['close'], df['high'] - df['open'])
     df['Upper_Shadow_Ratio'] = upper_shadow / candle_range
 
-    # 11. [新增] OBV (能量潮)
-    # 计算价格变化方向: 涨=+1, 跌=-1, 平=0
+    # 11. OBV (能量潮)
     obv_sign = np.sign(df['close'].diff()).fillna(0)
     df['OBV'] = (df['volume'] * obv_sign).cumsum()
-    # 计算 OBV 的 20 日均线，用于判断资金趋势
     df['OBV_MA20'] = df['OBV'].rolling(window=20).mean()
 
     return df
@@ -406,7 +309,6 @@ def _safely_process_fmp_data(data, sym):
         logging.error(f"[Data Process Error] {sym}: {e}")
         return None
 
-# [修改] 优化后的历史数据获取：降低并发，增加重试
 async def fetch_historical_batch(symbols: list, days=None):
     if not symbols: return {}
     if days is None: days = CONFIG["system"]["history_days"]
@@ -416,7 +318,6 @@ async def fetch_historical_batch(symbols: list, days=None):
     from_date = (now - timedelta(days=days + 60)).strftime("%Y-%m-%d") 
     to_date = now.strftime("%Y-%m-%d")
     
-    # [优化] 限制为 3 并发
     connector = aiohttp.TCPConnector(limit=3)
     semaphore = asyncio.Semaphore(3)
       
@@ -433,10 +334,10 @@ async def fetch_historical_batch(symbols: list, days=None):
                 try:
                     async with session.get(url, ssl=False) as response:
                         if response.status == 429:
-                            wait_time = 3 * (2 ** i) # 3s, 6s, 12s
+                            wait_time = 3 * (2 ** i)
                             logging.warning(f"[429 Rate Limit] {sym}. Retry {i+1}/{retries} in {wait_time}s...")
                             await asyncio.sleep(wait_time)
-                            continue # 重试
+                            continue 
                           
                         if response.status == 200:
                             data = await response.json()
@@ -445,14 +346,13 @@ async def fetch_historical_batch(symbols: list, days=None):
                                 results[sym] = df
                             else:
                                 logging.warning(f"[数据为空] {sym}")
-                            break # 成功退出循环
+                            break 
                         else:
                             logging.error(f"[HTTP 错误] {sym} Status: {response.status}")
                             break
                 except Exception as e:
                     logging.error(f"[异常] {sym}: {e}")
                     break
-            # [优化] 每次请求后稍微停顿，保护 API
             await asyncio.sleep(0.5)
 
     async with aiohttp.ClientSession(headers=headers, connector=connector) as session:
@@ -460,12 +360,10 @@ async def fetch_historical_batch(symbols: list, days=None):
         await asyncio.gather(*tasks_list)
     return results
 
-# [修改] 优化后的实时报价获取：降低并发，增加重试
 async def fetch_realtime_quotes(symbols: list):
     if not symbols: return {}
     quotes_map = {}
     
-    # [优化] 限制为 5 并发
     connector = aiohttp.TCPConnector(limit=5)
     semaphore = asyncio.Semaphore(5)
     headers = {"User-Agent": "StockBot/1.0", "Accept": "application/json"}
@@ -506,14 +404,11 @@ async def fetch_realtime_quotes(symbols: list):
         await asyncio.gather(*tasks_list)
     return quotes_map
 
-# [新增] 专门获取大盘指数 (Light Endpoint)
 async def fetch_market_index_data(days=60):
     now = datetime.now()
-    # 以此前推足够的时间以确保覆盖回测所需的20天后数据
     from_date = (now - timedelta(days=days + 30)).strftime("%Y-%m-%d")
     to_date = now.strftime("%Y-%m-%d")
     
-    # 使用你指定的 URL 格式获取纳指 (^IXIC)
     url = f"https://financialmodelingprep.com/stable/historical-price-eod/light?symbol=%5EIXIC&from={from_date}&to={to_date}&apikey={FMP_API_KEY}"
     
     async with aiohttp.ClientSession() as session:
@@ -525,14 +420,14 @@ async def fetch_market_index_data(days=60):
                         df = pd.DataFrame(data)
                         if 'date' in df.columns and 'price' in df.columns:
                             df['date'] = pd.to_datetime(df['date'])
-                            # 确保按时间正序排列 (旧->新)，方便 iloc 索引偏移
                             df = df.set_index('date').sort_index(ascending=True)
                             return df
         except Exception as e:
             logging.error(f"[Market Index Error] {e}")
     return None
 
-def find_pivots(df, window=5):
+# [修改重点] 寻找高低点：增加回溯范围，增加窗口大小以过滤噪点
+def find_pivots(df, window=10):
     highs = df['high'].values
     lows = df['low'].values
     dates = df.index
@@ -540,7 +435,9 @@ def find_pivots(df, window=5):
     pivots_high = [] 
     pivots_low = []
       
-    start_idx = max(0, len(df) - 60)
+    # [修改] 强制回溯 250 天，解决 ADBE 问题
+    lookback_days = 250
+    start_idx = max(0, len(df) - lookback_days)
       
     for i in range(start_idx + window, len(df) - window):
         is_high = True
@@ -559,18 +456,18 @@ def find_pivots(df, window=5):
             
     return pivots_high, pivots_low
 
+# [修改重点] 形态识别：增加交点(Apex)逻辑，防止 MSFT 那种右侧误报
 def identify_patterns(df):
-    """
-    无限延长画线 + 3.5% 新鲜度检查
-    """
-    if len(df) < 30: return None, [], []
+    if len(df) < 60: return None, [], []
       
-    pivots_high, pivots_low = find_pivots(df, window=4)
+    # 使用更大的 window
+    pivots_high, pivots_low = find_pivots(df, window=10)
       
     res_line, sup_line = [], []
     pattern_name = None
 
-    vis_start_idx = max(0, len(df) - 80) 
+    # 画图可视化的起点，设为 250 天前
+    vis_start_idx = max(0, len(df) - 250) 
     curr_idx = len(df) - 1
       
     t_end = df.index[curr_idx]
@@ -582,37 +479,48 @@ def identify_patterns(df):
         x2, y2 = ph2[2], ph2[1]
         
         if x2 != x1:
-            m = (y2 - y1) / (x2 - x1)
-            c = y1 - m * x1
+            m_res = (y2 - y1) / (x2 - x1)
+            c_res = y1 - m_res * x1
             
-            p_start = m * vis_start_idx + c
-            p_end = m * curr_idx + c
+            p_start = m_res * vis_start_idx + c_res
+            p_end = m_res * curr_idx + c_res
             
-            res_line = [[(t_start, p_start), (t_end, p_end)]]
-            
-            if len(pivots_low) >= 2:
-                pl1, pl2 = pivots_low[-2], pivots_low[-1]
-                lx1, ly1 = pl1[2], pl1[1]
-                lx2, ly2 = pl2[2], pl2[1]
-                
-                if lx2 != lx1:
-                    lm = (ly2 - ly1) / (lx2 - lx1)
-                    lc = ly1 - lm * lx1
+            # 只有当阻力线是向下倾斜或走平时才画
+            if m_res < 0.05: 
+                res_line = [[(t_start, p_start), (t_end, p_end)]]
+
+                if len(pivots_low) >= 2:
+                    pl1, pl2 = pivots_low[-2], pivots_low[-1]
+                    lx1, ly1 = pl1[2], pl1[1]
+                    lx2, ly2 = pl2[2], pl2[1]
                     
-                    lp_start = lm * vis_start_idx + lc
-                    lp_end = lm * curr_idx + lc
-                    
-                    sup_line = [[(t_start, lp_start), (t_end, lp_end)]]
-                    
-                    curr_price = df['close'].iloc[-1]
-                    res_today = m * curr_idx + c
-                    
-                    if m < 0.005 and (lm > m + 0.01):
-                         if curr_price > res_today:
-                             # Freshness Check
-                             if curr_price < res_today * 1.035:
-                                 pattern_name = "形态突破 (刚启动)"
-    
+                    if lx2 != lx1:
+                        m_sup = (ly2 - ly1) / (lx2 - lx1)
+                        c_sup = ly1 - m_sup * lx1
+                        
+                        lp_start = m_sup * vis_start_idx + c_sup
+                        lp_end = m_sup * curr_idx + c_sup
+                        
+                        sup_line = [[(t_start, lp_start), (t_end, lp_end)]]
+                        
+                        # [核心修改] 交点 (Apex) 验证逻辑
+                        curr_price = df['close'].iloc[-1]
+                        res_today = m_res * curr_idx + c_res
+                        
+                        is_valid_structure = True
+                        # 计算交点
+                        if abs(m_res - m_sup) > 1e-9:
+                            apex_x = (c_sup - c_res) / (m_res - m_sup)
+                            # 如果当前 K 线位置已经跑到交点右侧很远，说明形态已失效
+                            if curr_idx > apex_x + 5:
+                                is_valid_structure = False
+                        
+                        if is_valid_structure and m_res < 0.005 and (m_sup > m_res):
+                             if curr_price > res_today:
+                                 # 新鲜度检查
+                                 if curr_price < res_today * 1.05:
+                                     pattern_name = "形态突破 (三角/楔形)"
+   
     return pattern_name, res_line, sup_line
 
 def detect_candle_patterns(df):
@@ -650,26 +558,20 @@ def get_volume_projection_factor(ny_now, minutes_elapsed):
     elif minutes_elapsed <= 60: return 13.0 - (13.0 - 8.0) * (minutes_elapsed - 10) / 50
     else: return 8.0 - (8.0 - 4.0) * (minutes_elapsed - 60) / (TOTAL_MINUTES - 60)
 
-# [新增] 计算双线：止损位 (ATR) 和 支撑位 (Structure)
 def calculate_risk_levels(df):
     """
     返回 (stop_loss, support)
-    Stop Loss: 2.8x ATR (Hard Risk Control)
-    Support: Pivot Low (Structural Level)
     """
     curr_close = df['close'].iloc[-1]
     atr = df['ATR'].iloc[-1] if 'ATR' in df.columns else curr_close * 0.05
       
-    # 1. 计算止损 (Stop Loss) - 回归 2.8x ATR
     stop_loss = curr_close - (2.8 * atr)
       
-    # 2. 计算支撑 (Support) - 找前低结构
     _, pivots_low = find_pivots(df, window=5)
-    support = stop_loss # 默认 fallback
+    support = stop_loss
       
     if pivots_low:
         last_pivot_low = pivots_low[-1][1]
-        # 如果前低在现价下方，且不要离得太远(比如跌了50%)，则作为支撑
         if last_pivot_low < curr_close:
              support = last_pivot_low
              
@@ -692,11 +594,9 @@ def check_signals_sync(df):
     weights = CONFIG["SCORE"]["WEIGHTS"]
     violations = [] 
 
-    # --- 基础统计数据 (用于位置判断) ---
     low_60 = df['low'].tail(60).min()
     high_60 = df['high'].tail(60).max()
     
-    # [修改 Fix 1] 修复逻辑错误: 应该是 Low * (1 + 0.6) = 1.6倍
     if curr['close'] > low_60 * (1 + CONFIG["filter"]["max_60d_gain"]): 
         violations.append("RISK: 短期涨幅过大")
         
@@ -723,7 +623,6 @@ def check_signals_sync(df):
     is_volume_ok = False
     proj_vol_final = curr['volume']
       
-    # 只有盘中检查量能，盘前已被外部循环屏蔽
     if is_open_market:
         if minutes_elapsed < 30:
             is_volume_ok = True 
@@ -736,12 +635,10 @@ def check_signals_sync(df):
             if proj_vol_final >= curr['Vol_MA20'] * CONFIG["filter"]["min_vol_ratio"]:
                 is_volume_ok = True
     else:
-        # 盘后复盘使用
         if curr['volume'] >= curr['Vol_MA20'] * CONFIG["filter"]["min_vol_ratio"]:
             is_volume_ok = True
             
     if not is_volume_ok:
-        # [修改] 删除了 (死鱼股)
         violations.append("FILTER: 量能不足")
 
     if proj_vol_final > curr['Vol_MA20'] * 2.0:
@@ -752,22 +649,19 @@ def check_signals_sync(df):
         triggers.append(f"K线: {', '.join(candle_patterns)}")
         score += weights["CANDLE_PATTERN"]
 
-    # [修改重点] BB Squeeze 逻辑修改
     bb_min_width = CONFIG["filter"]["min_bb_squeeze_width"]
-    bb_target_width = CONFIG["filter"]["min_bb_expand_width"] # 使用新的目标宽度
+    bb_target_width = CONFIG["filter"]["min_bb_expand_width"]
     max_pos = CONFIG["filter"]["max_bottom_pos"]
     
-    # 计算当前价格在过去60天内的相对位置 (0=Lowest, 1=Highest)
     if high_60 > low_60:
         price_pos = (curr['close'] - low_60) / (high_60 - low_60)
     else:
         price_pos = 0.5
       
-    # 逻辑: 昨日挤压 + 今日变大到达标 + 股票上涨(阳线) + 处于底部
     if prev['BB_Width'] < bb_min_width: 
-        if curr['BB_Width'] >= bb_target_width: # 宽度变大达到目标
-            if curr['close'] > curr['open']: # 股票是上涨的 (收阳)
-                 if price_pos <= max_pos: # 处于低位
+        if curr['BB_Width'] >= bb_target_width: 
+            if curr['close'] > curr['open']: 
+                 if price_pos <= max_pos: 
                     triggers.append(f"BB Squeeze: 低位启动 (宽:{curr['BB_Width']:.3f}, 位:{price_pos:.2f})")
                     score += weights["BB_SQUEEZE"]
 
@@ -819,10 +713,8 @@ def check_signals_sync(df):
              triggers.append(f"MACD 底背离")
              score += weights["MACD_DIVERGE"]
 
-    # [新增] OBV 验证信号 (资金流入确认)
-    # 逻辑: 当前OBV高于20日均线(趋势向上) 且 当前OBV高于5天前(近期流入) 且 股价收涨
     if curr['OBV'] > curr['OBV_MA20']:
-        obv_rising = curr['OBV'] > df['OBV'].iloc[-5] # 近期也是涨的
+        obv_rising = curr['OBV'] > df['OBV'].iloc[-5]
         if obv_rising and curr['close'] > curr['open']:
              triggers.append("资金面: OBV趋势向上 (资金流入)")
              score += weights["OBV_TREND_UP"]
@@ -846,13 +738,11 @@ def check_signals_sync(df):
 async def check_signals(df):
     return await asyncio.to_thread(check_signals_sync, df)
 
-# [修改] 接收 stop_price 和 support_price
 def _generate_chart_sync(df, ticker, res_line=[], sup_line=[], stop_price=None, support_price=None):
     buf = io.BytesIO()
       
     last_close = df['close'].iloc[-1]
       
-    # 默认值保护
     if stop_price is None: stop_price = last_close * 0.95
     if support_price is None: support_price = last_close * 0.90
 
@@ -869,9 +759,8 @@ def _generate_chart_sync(df, ticker, res_line=[], sup_line=[], stop_price=None, 
         mpf.make_addplot(plot_df['Nx_Yellow_UP'], color='gold', width=1.0),
         mpf.make_addplot(plot_df['Nx_Yellow_DW'], color='gold', width=1.0),
         
-        # [修改] 双线绘制
-        mpf.make_addplot(stop_line_data, color='red', linestyle='--', width=1.2),    # 止损线 (Red)
-        mpf.make_addplot(supp_line_data, color='green', linestyle=':', width=1.2),   # 支撑线 (Green)
+        mpf.make_addplot(stop_line_data, color='red', linestyle='--', width=1.2), 
+        mpf.make_addplot(supp_line_data, color='green', linestyle=':', width=1.2), 
         
         mpf.make_addplot(plot_df['MACD'], panel=2, type='bar', color='dimgray', alpha=0.5, ylabel='MACD'),
         mpf.make_addplot(plot_df['DIF'], panel=2, color='orange'),
@@ -899,7 +788,6 @@ def _generate_chart_sync(df, ticker, res_line=[], sup_line=[], stop_price=None, 
 async def generate_chart(df, ticker, res_line=[], sup_line=[], stop_price=None, support_price=None):
     return await asyncio.to_thread(_generate_chart_sync, df, ticker, res_line, sup_line, stop_price, support_price)
 
-# [修改] 增加 10日 逻辑
 async def update_stats_data():
     if "signal_history" not in settings: return
     updates_made = False
@@ -914,7 +802,6 @@ async def update_stats_data():
         for ticker, data in tickers_data.items():
             need_1d = data.get("ret_1d") is None
             need_5d = data.get("ret_5d") is None and (today - signal_date).days > 5
-            # 新增 10日
             need_10d = data.get("ret_10d") is None and (today - signal_date).days > 10
             need_20d = data.get("ret_20d") is None and (today - signal_date).days > 20
             if need_1d or need_5d or need_10d or need_20d: symbols_to_check.add(ticker)
@@ -966,7 +853,6 @@ def get_level_by_score(score):
     if score >= 70: return CONFIG["SCORE"]["EMOJI"].get(70, "LOW")
     return CONFIG["SCORE"]["EMOJI"].get(60, "TEST") 
 
-# [修改] 接收 support 参数，并显示在 Embed 中
 def create_alert_embed(ticker, score, price, reason, stop_loss, support, df, filename):
     level_str = get_level_by_score(score)
     if "RISK" in reason or "FILTER" in reason or "STALE" in reason:
@@ -974,10 +860,7 @@ def create_alert_embed(ticker, score, price, reason, stop_loss, support, df, fil
     else:
         color = 0x00ff00 if score >= 80 else 0x3498db
       
-    # [修改点] 标题改为 "🚨TSLA 抄底信号 | 得分 15" 格式
     embed = discord.Embed(title=f"🚨{ticker} 抄底信号 | 得分 {score}", color=color)
-    
-    # [修改点] 恢复现价
     embed.description = f"**现价:** `${price:.2f}`"
       
     curr = df.iloc[-1]
@@ -986,7 +869,6 @@ def create_alert_embed(ticker, score, price, reason, stop_loss, support, df, fil
     market_open = ny_now.replace(hour=9, minute=30, second=0, microsecond=0)
     minutes_elapsed = (ny_now - market_open).total_seconds() / 60
       
-    # [修改点] 量比加上 (预估)
     vol_label = "**量比 (预估):**"
     vol_ratio = 0.0
       
@@ -997,10 +879,8 @@ def create_alert_embed(ticker, score, price, reason, stop_loss, support, df, fil
     else:
         vol_ratio = curr['volume'] / df['Vol_MA20'].iloc[-1]
       
-    # [新增] OBV 状态文本
     obv_status = "流入" if curr['OBV'] > curr['OBV_MA20'] else "流出"
     
-    # [修改点] 删除了 MACD，删除了标题（使用 \u200b）
     indicator_text = (
         f"**RSI(14):** `{curr['RSI']:.1f}`\n"
         f"**ADX:** `{curr['ADX']:.1f}`\n"
@@ -1010,20 +890,14 @@ def create_alert_embed(ticker, score, price, reason, stop_loss, support, df, fil
     )
     embed.add_field(name="\u200b", value=indicator_text, inline=True)
       
-    # [修改点] 删除了建议仓位，删除了标题（使用 \u200b）
     risk_text = (
         f"**止损价:** `${stop_loss:.2f}`\n"
         f"**支撑位:** `${support:.2f}`\n"
     )
     embed.add_field(name="\u200b", value=risk_text, inline=True)
       
-    # [修改点] 将“触发详情”标题改为 \u200b (空字符)，隐藏标题但保留内容
     embed.add_field(name="\u200b", value=f"```{reason}```", inline=False)
-      
     embed.set_image(url=f"attachment://{filename}")
-    
-    # [修改点] 完全删除 Footer
-    # embed.set_footer(text=...) 
       
     return embed
 
@@ -1047,13 +921,11 @@ class StockBotClient(discord.Client):
         if not self.monitor_stocks.is_running():
             self.monitor_stocks.start()
         
-        # [新增] 启动定时报告任务
         if not self.scheduled_report.is_running():
             self.scheduled_report.start()
             
         await self.tree.sync()
 
-    # [修改] 发送每日回测报告逻辑
     async def send_daily_stats_report(self):
         if not self.alert_channel: return
         
@@ -1062,27 +934,21 @@ class StockBotClient(discord.Client):
         load_settings()
         
         history = settings.get("signal_history", {})
-        
-        # [修改] 改用新的 fetch_market_index_data 获取 ^IXIC
         market_df = await fetch_market_index_data(days=80)
 
         def get_market_ret(date_str, offset_days):
             if market_df is None or market_df.empty: return None
             try:
                 target_date = pd.to_datetime(date_str).normalize()
-                # 找到对应日期在 index 中的位置
                 idx = market_df.index.get_indexer([target_date], method='nearest')[0]
                 
-                # 确保索引没有越界
                 if idx + offset_days < len(market_df):
-                    # [注意] Light API 返回的是 'price' 字段
                     p_start = market_df.iloc[idx]['price']
                     p_end = market_df.iloc[idx + offset_days]['price']
                     return ((p_end - p_start) / p_start) * 100
             except: pass
             return None
 
-        # 初始化统计容器: 分离个股(s)和大盘(m)的统计
         stats_agg = {k: {"s_sum": 0.0, "s_c": 0, "m_sum": 0.0, "m_c": 0, "w": 0} for k in ["1d", "5d", "10d", "20d"]}
         
         valid_signals = []
@@ -1094,45 +960,35 @@ class StockBotClient(discord.Client):
                 try:
                     sig_date = datetime.strptime(date_str, "%Y-%m-%d").date()
                 except: continue
-                if (today - sig_date).days > 25: continue # 稍微放宽一点范围
+                if (today - sig_date).days > 25: continue 
                 
                 tickers_data = history[date_str]
                 for ticker, data in tickers_data.items():
-                    if data.get("score", 0) == 0: continue # 过滤 TEST
+                    if data.get("score", 0) == 0: continue 
                     
                     score = data.get("score", 0)
                     valid_signals.append((date_str, ticker, score, data))
                     
                     for k, days_off in [("1d", 1), ("5d", 5), ("10d", 10), ("20d", 20)]:
-                        # 1. 计算大盘数据 (无条件，只要有信号日期)
                         m = get_market_ret(date_str, days_off)
                         if m is not None:
                             stats_agg[k]["m_sum"] += m
                             stats_agg[k]["m_c"] += 1
                         
-                        # 2. 计算个股数据
                         r = data.get(f"ret_{k}")
                         if r is not None:
                             stats_agg[k]["s_sum"] += r
                             stats_agg[k]["s_c"] += 1
                             if r > 0: stats_agg[k]["w"] += 1
         else:
-            # [Fix 3] 即使没有历史数据，也尝试计算最近的大盘走势作为参考
-            # 这里的逻辑是：如果完全没有历史信号，就拿大盘最近的 1,5,10,20 天前的涨幅填进去
             if market_df is not None and not market_df.empty:
-                last_idx = -1 # 最近的一天
-                # 倒推模拟数据
-                # 实际上这个场景比较特殊，我们选择直接在 Embed 显示时处理 "等待数据"
                 pass
 
-        # [Fix 2] 删除了标题中的 (vs ^IXIC)
         embed = discord.Embed(title="回测统计", color=0x9b59b6)
         
-        # [重点] 恢复核心数据行
         def mk_field(key):
             d = stats_agg[key]
             
-            # 个股部分
             if d["s_c"] > 0:
                 avg_stock = d["s_sum"] / d["s_c"]
                 avg_stock_str = f"`{avg_stock:+.2f}%`"
@@ -1142,14 +998,11 @@ class StockBotClient(discord.Client):
                 avg_stock_str = "Wait..."
                 win_rate = "-"
 
-            # 大盘部分 (即使个股没数据，只要有 m_c 也显示)
             if d["m_c"] > 0:
                 avg_market = d["m_sum"] / d["m_c"]
                 avg_market_str = f"`{avg_market:+.2f}%`"
             else:
-                # [Fix 3] 如果连信号都没，尝试获取大盘最近走势 (Trailing)
                 if d["s_c"] == 0 and market_df is not None and not market_df.empty:
-                    # 计算大盘 Trailing Return
                     try:
                         days_offset = int(key[:-1])
                         if len(market_df) > days_offset:
@@ -1168,7 +1021,6 @@ class StockBotClient(discord.Client):
                     avg_market = None
                     avg_market_str = "Wait..."
 
-            # 超额收益
             if avg_stock is not None and avg_market is not None and isinstance(avg_market, float):
                 diff = avg_stock - avg_market
                 diff_str = f"**{diff:+.2f}%**"
@@ -1203,11 +1055,9 @@ class StockBotClient(discord.Client):
         embed.set_footer(text=f"Report generated at {datetime.now(MARKET_TIMEZONE).strftime('%H:%M:%S')} ET")
         await self.alert_channel.send(embed=embed)
 
-    # [新增] 每天收盘后半小时 (16:30 ET) 自动发送回测报告
     @tasks.loop(minutes=1)
     async def scheduled_report(self):
         now_et = datetime.now(MARKET_TIMEZONE)
-        # 检查是否是 16:30
         if now_et.hour == 16 and now_et.minute == 30:
             today_date = now_et.date()
             if self.last_report_date != today_date:
@@ -1220,7 +1070,6 @@ class StockBotClient(discord.Client):
         now_et = datetime.now(MARKET_TIMEZONE)
         curr_time, today_str = now_et.time(), now_et.strftime('%Y-%m-%d')
         
-        # [修改] 删除 pre-market 判断，只保留 10:00 后的扫描
         is_open_scan = TIME_MARKET_SCAN_START <= curr_time <= TIME_MARKET_CLOSE
         
         if not is_open_scan: return
@@ -1255,7 +1104,6 @@ class StockBotClient(discord.Client):
             if ticker in quotes_map:
                 df = await asyncio.to_thread(merge_and_recalc_sync, df_hist, quotes_map[ticker])
             
-            # 如果合并失败导致df为空，跳过
             if df is None or df.empty: continue
 
             user_ids = ticker_user_map[ticker]
@@ -1264,7 +1112,6 @@ class StockBotClient(discord.Client):
             for uid in user_ids:
                 status_key = f"{ticker}-{today_str}"
                 status = users_data[uid]['daily_status'].get(status_key, "NONE")
-                # 只有 NONE 状态才会发 (即当天第一次)
                 if status == "NONE":
                     users_to_ping.append(uid)
                     all_alerted = False
@@ -1299,7 +1146,6 @@ class StockBotClient(discord.Client):
             if is_triggered:
                 price = df['close'].iloc[-1]
                 
-                # [修改] 计算双线
                 stop_loss, support = calculate_risk_levels(df)
                 
                 alert_obj = {
@@ -1309,7 +1155,7 @@ class StockBotClient(discord.Client):
                     "price": price,
                     "reason": reason,
                     "support": support,
-                    "stop_loss": stop_loss, # 新增
+                    "stop_loss": stop_loss,
                     "df": df,
                     "res_line": res_line,
                     "sup_line": sup_line,
@@ -1336,7 +1182,7 @@ class StockBotClient(discord.Client):
                     "reason": alert["reason"],
                     "ret_1d": current_hist.get("ret_1d"),
                     "ret_5d": current_hist.get("ret_5d"),
-                    "ret_10d": current_hist.get("ret_10d"), # 记录 10d
+                    "ret_10d": current_hist.get("ret_10d"),
                     "ret_20d": current_hist.get("ret_20d"),
                 }
                 
@@ -1347,7 +1193,6 @@ class StockBotClient(discord.Client):
                 mentions = " ".join([f"<@{uid}>" for uid in users])
                 
                 if sent_charts < max_charts:
-                    # [修改] 传递双线给画图
                     chart_buf = await generate_chart(
                         alert["df"], ticker, alert["res_line"], alert["sup_line"], 
                         alert["stop_loss"], alert["support"]
@@ -1383,7 +1228,6 @@ class StockBotClient(discord.Client):
 intents = discord.Intents.default()
 client = StockBotClient(intents=intents)
 
-# [新增] 重置统计命令
 @client.tree.command(name="reset_stats", description="Reset all backtest statistics")
 async def reset_stats(interaction: discord.Interaction):
     global settings
@@ -1448,19 +1292,14 @@ async def watch_import(interaction: discord.Interaction, preset: app_commands.Ch
     save_settings()
     await interaction.followup.send(f"Imported {preset.name} ({len(new_list)} stocks).")
 
-# [修改] 升级版统计命令 (20天去重 + 纳斯达克 ^IXIC 对比)
 @client.tree.command(name="stats", description="View historical signal accuracy (20-day window)")
 async def stats_command(interaction: discord.Interaction):
     await interaction.response.defer()
     
-    # 1. 确保个股收益数据是最新的
     await update_stats_data()
     
     load_settings()
     history = settings.get("signal_history", {})
-    # [修改] 即使没有 history 也不直接返回，为了显示大盘 Trailing 数据
-    
-    # 2. [修改] 抓取纳斯达克 (^IXIC) 数据作为基准
     market_df = await fetch_market_index_data(days=80)
 
     def get_market_ret(date_str, offset_days):
@@ -1469,7 +1308,6 @@ async def stats_command(interaction: discord.Interaction):
             target_date = pd.to_datetime(date_str).normalize()
             idx = market_df.index.get_indexer([target_date], method='nearest')[0]
             if idx + offset_days < len(market_df):
-                # [注意] 这里使用 price
                 p_start = market_df.iloc[idx]['price']
                 p_end = market_df.iloc[idx + offset_days]['price']
                 return ((p_end - p_start) / p_start) * 100
@@ -1477,8 +1315,6 @@ async def stats_command(interaction: discord.Interaction):
             pass
         return None
 
-    # 3. 筛选与统计
-    # s_sum: stock sum, s_c: stock count, m_sum: market sum, m_c: market count
     stats_agg = {
         k: {"s_sum": 0.0, "s_c": 0, "m_sum": 0.0, "m_c": 0, "w": 0} 
         for k in ["1d", "5d", "10d", "20d"]
@@ -1508,29 +1344,23 @@ async def stats_command(interaction: discord.Interaction):
             score = data.get("score", 0)
             valid_signals.append((date_str, ticker, score, data))
             
-            # 累加统计数据
             for k, days_off in [("1d", 1), ("5d", 5), ("10d", 10), ("20d", 20)]:
-                # [Fix 3] 独立累加大盘数据
                 m = get_market_ret(date_str, days_off) 
                 if m is not None:
                     stats_agg[k]["m_sum"] += m
                     stats_agg[k]["m_c"] += 1
 
-                # 独立累加个股数据
                 r = data.get(f"ret_{k}")
                 if r is not None:
                     stats_agg[k]["s_sum"] += r
                     stats_agg[k]["s_c"] += 1
                     if r > 0: stats_agg[k]["w"] += 1
 
-    # 4. 构建 Embed
-    # [Fix 2] 标题修改
     embed = discord.Embed(title="回测统计", color=0x00BFFF)
     
     def mk_field(key):
         d = stats_agg[key]
         
-        # 个股部分
         if d["s_c"] > 0:
             avg_stock = d["s_sum"] / d["s_c"]
             avg_stock_str = f"`{avg_stock:+.2f}%`"
@@ -1540,12 +1370,10 @@ async def stats_command(interaction: discord.Interaction):
             avg_stock_str = "Wait..."
             win_rate = "-"
 
-        # 大盘部分 (只要 m_c > 0 就显示，不用管 s_c)
         if d["m_c"] > 0:
             avg_market = d["m_sum"] / d["m_c"]
             avg_market_str = f"`{avg_market:+.2f}%`"
         else:
-            # [Fix 3] 无信号时，显示最近的大盘趋势
             if d["s_c"] == 0 and market_df is not None and not market_df.empty:
                 try:
                     days_offset = int(key[:-1])
@@ -1565,7 +1393,6 @@ async def stats_command(interaction: discord.Interaction):
                 avg_market = None
                 avg_market_str = "Wait..."
 
-        # 超额收益
         if avg_stock is not None and avg_market is not None and isinstance(avg_market, float):
             diff = avg_stock - avg_market
             diff_str = f"**{diff:+.2f}%**"
@@ -1626,17 +1453,14 @@ async def test_command(interaction: discord.Interaction, ticker: str):
     
     price = df['close'].iloc[-1]
     
-    # [修改] 计算双线
     stop_loss, support = calculate_risk_levels(df)
 
     if not reason: 
         reason = f"无明显信号 (得分: {score})"
     
-    # [修改] 传递双线给画图
     chart_buf = await generate_chart(df, ticker, r_l, s_l, stop_loss, support)
     filename = f"{ticker}_test.png"
     
-    # [修改] 传递双线给 Embed
     embed = create_alert_embed(ticker, score, price, reason, stop_loss, support, df, filename)
 
     try:
