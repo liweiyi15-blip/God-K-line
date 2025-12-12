@@ -931,133 +931,137 @@ def check_signals_sync(df):
 async def check_signals(df):
     return await asyncio.to_thread(check_signals_sync, df)
 
-# [修改] 增加参数 anchor_idx, 增加裁剪逻辑
+# [修改] 增加参数 anchor_idx, 增加裁剪逻辑, 增加右侧留白, 移除副图, 美化样式, 增加布林中轨
 def _generate_chart_sync(df, ticker, res_line=[], sup_line=[], stop_price=None, support_price=None, anchor_idx=None):
     buf = io.BytesIO()
-      
-    last_close = df['close'].iloc[-1]
-      
-    if stop_price is None: stop_price = last_close * 0.95
-    if support_price is None: support_price = last_close * 0.90
-
-    s = mpf.make_marketcolors(up='r', down='g', inherit=True)
-    my_style = mpf.make_mpf_style(base_mpl_style="ggplot", marketcolors=s, gridstyle=":")
-      
-    # [修改] 动态调整画图范围
-    # 默认回溯天数 (如果没有形态)
+    
+    # --- 1. 数据准备与切片 ---
+    # 默认回溯天数
     default_lookback = 80
     start_idx = max(0, len(df) - default_lookback)
       
-    # 如果有确切的锚点（形态的真实起点），优先使用它来定位左边界
+    # 如果有确切的锚点，优先使用它来定位左边界
     if anchor_idx is not None:
-        # 从锚点往左推 20 个交易日
         start_idx = max(0, anchor_idx - 20)
 
-    plot_df = df.iloc[start_idx:]
-      
-    # [新增] 裁剪函数：确保线段不会超出plot_df的左边界
+    plot_df = df.iloc[start_idx:].copy()
+    
+    # --- 2. 右侧留白逻辑 ---
+    # 生成未来 20 个工作日的时间索引
+    last_date = plot_df.index[-1]
+    future_dates = pd.bdate_range(start=last_date + timedelta(days=1), periods=20)
+    
+    # 创建一个全空的 DataFrame 用于占位
+    future_df = pd.DataFrame(index=future_dates, columns=plot_df.columns)
+    
+    # 合并数据
+    plot_df = pd.concat([plot_df, future_df])
+
+    # --- 3. 辅助线数据准备 ---
+    valid_len = len(df.iloc[start_idx:]) 
+    total_len = len(plot_df)            
+    
+    if stop_price is None: stop_price = df['close'].iloc[-1] * 0.95
+    if support_price is None: support_price = df['close'].iloc[-1] * 0.90
+    
+    stop_line_data = [stop_price] * total_len
+    supp_line_data = [support_price] * total_len
+
+    # --- 4. 裁剪趋势线 ---
     def clip_line_segments(segments):
         new_segments = []
         if not segments: return new_segments
-        
         plot_start_date = plot_df.index[0]
         
         for seg in segments:
             d1, p1 = seg[0]
             d2, p2 = seg[1]
-            
-            # 如果整条线都在左边界左边，丢弃
-            if d2 < plot_start_date:
-                continue
-            
-            # 如果线段的起点在左边界左边，需要裁剪
+            if d2 < plot_start_date: continue
             if d1 < plot_start_date:
-                # 为了计算精确的裁剪点，我们需要找到对应的索引位置计算斜率
                 try:
-                    # 找到d1和d2在原始df中的整数索引
-                    i1 = df.index.get_loc(d1)
-                    i2 = df.index.get_loc(d2)
-                    
-                    if i2 == i1: continue
-                    
-                    # 计算斜率
-                    m = (p2 - p1) / (i2 - i1)
-                    
-                    # 计算新的起点（即start_idx处的价格）
-                    # new_p1 = p1 + m * (start_idx - i1)
-                    new_p1 = p1 + m * (start_idx - i1)
-                    new_d1 = plot_start_date
-                    
-                    new_segments.append([(new_d1, new_p1), (d2, p2)])
-                except Exception as e:
-                    logging.warning(f"Clipping error: {e}")
-                    # 如果计算出错，为了安全起见，保留原始线段（可能会报错）或者丢弃
-                    # 这里选择丢弃以防报错
-                    continue
+                    new_segments.append(seg) 
+                except: continue
             else:
-                # 起点在范围内，无需裁剪
                 new_segments.append(seg)
         return new_segments
 
-    # 应用裁剪
     res_line_clipped = clip_line_segments(res_line)
     sup_line_clipped = clip_line_segments(sup_line)
 
-    stop_line_data = [stop_price] * len(plot_df)
-    supp_line_data = [support_price] * len(plot_df)
-
+    # --- 5. 配置 addplot (含 Nx结构, Boll三轨, 止损支撑) ---
     add_plots = [
+        # Nx 结构 (实线)
         mpf.make_addplot(plot_df['Nx_Blue_UP'], color='dodgerblue', width=1.0),
         mpf.make_addplot(plot_df['Nx_Blue_DW'], color='dodgerblue', width=1.0),
         mpf.make_addplot(plot_df['Nx_Yellow_UP'], color='gold', width=1.0),
         mpf.make_addplot(plot_df['Nx_Yellow_DW'], color='gold', width=1.0),
         
-        mpf.make_addplot(stop_line_data, color='red', linestyle='--', width=1.2), 
-        mpf.make_addplot(supp_line_data, color='green', linestyle=':', width=1.2), 
+        # [新增] 布林带三轨 (淡紫色虚线/点线，不干扰主视线)
+        mpf.make_addplot(plot_df['BB_Up'], color='#9370DB', linestyle='-.', width=0.8, alpha=0.7),
+        # 中轨：使用更轻的点线，辅助判断中枢
+        mpf.make_addplot(plot_df['BB_Mid'], color='#9370DB', linestyle=':', width=0.6, alpha=0.6), 
+        mpf.make_addplot(plot_df['BB_Low'], color='#9370DB', linestyle='-.', width=0.8, alpha=0.7),
         
-        mpf.make_addplot(plot_df['MACD'], panel=2, type='bar', color='dimgray', alpha=0.5, ylabel='MACD'),
-        mpf.make_addplot(plot_df['DIF'], panel=2, color='orange'),
-        mpf.make_addplot(plot_df['DEA'], panel=2, color='blue'),
+        # 止损/支撑 (延伸到未来)
+        mpf.make_addplot(stop_line_data, color='red', linestyle='--', width=1.0, alpha=0.6), 
+        mpf.make_addplot(supp_line_data, color='green', linestyle=':', width=1.0, alpha=0.6), 
     ]
     
-    # --- 1. 准备趋势线 (alines) ---
-    seq_of_points = []
+    # --- 6. 审美美化 ---
+    my_marketcolors = mpf.make_marketcolors(
+        up='#ff333a',      
+        down='#00b060',    
+        edge={'up': '#ff333a', 'down': '#00b060'}, 
+        wick={'up': '#ff333a', 'down': '#00b060'}, 
+        volume='in'        
+    )
     
-    # 使用裁剪后的线段
+    my_style = mpf.make_mpf_style(
+        base_mpl_style="seaborn-v0_8-whitegrid", 
+        marketcolors=my_marketcolors,
+        gridstyle=':',     
+        gridcolor='#e0e0e0', 
+        gridaxis='both',
+        facecolor='white', 
+        rc={
+            'font.family': 'sans-serif', 
+            'axes.labelcolor': 'grey',
+            'xtick.labelcolor': 'grey',
+            'ytick.labelcolor': 'grey',
+            'axes.edgecolor': '#f0f0f0' 
+        }
+    )
+
+    # 准备趋势线
+    seq_of_points = []
     if res_line_clipped:
         for line in res_line_clipped:
-            p1 = (line[0][0], float(line[0][1]))
-            p2 = (line[1][0], float(line[1][1]))
-            seq_of_points.append([p1, p2])
-    
+            seq_of_points.append([(line[0][0], float(line[0][1])), (line[1][0], float(line[1][1]))])
     if sup_line_clipped:
         for line in sup_line_clipped:
-            p1 = (line[0][0], float(line[0][1]))
-            p2 = (line[1][0], float(line[1][1]))
-            seq_of_points.append([p1, p2])
-      
+            seq_of_points.append([(line[0][0], float(line[0][1])), (line[1][0], float(line[1][1]))])
+
     kwargs = dict(
         type='candle', 
         style=my_style, 
-        title=f"{ticker} Analysis", 
-        ylabel='Price', 
+        title=dict(title=f"{ticker} Analysis", color='black', fontsize=15),
+        ylabel='', 
         addplot=add_plots, 
-        volume=True, 
-        panel_ratios=(6, 2, 2), 
+        volume=False, # 关闭成交量
         tight_layout=True, 
-        datetime_format='%Y%m%d', # <--- 修改点：时间格式改为紧凑的 YYYYMMDD
-        xrotation=0,              # <--- 修改点：日期不旋转，进一步利用空间
-        savefig=dict(fname=buf, format='png', bbox_inches='tight', pad_inches=0)
+        datetime_format='%m-%d', 
+        xrotation=0, 
+        figsize=(10, 6), 
+        savefig=dict(fname=buf, format='png', bbox_inches='tight', pad_inches=0.1, dpi=120)
     )
       
-    # 添加趋势线 (如果有) - 统一设置为灰色虚线
     if seq_of_points:
         kwargs['alines'] = dict(
             alines=seq_of_points,
-            colors='gray',         # <--- 还原：灰色
-            linestyle='--',        # <--- 还原：虚线
-            linewidths=1.5,
-            alpha=0.8
+            colors='gray', 
+            linestyle='--', 
+            linewidths=1.2,
+            alpha=0.6
         )
       
     try:
