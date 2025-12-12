@@ -14,7 +14,7 @@ import aiohttp
 import io
 import matplotlib
 import random
-import warnings # [新增] 用于过滤警告
+import warnings
 
 # [日志配置]
 import logging
@@ -485,29 +485,59 @@ def identify_patterns(df):
 
     # --- 2. 支撑线 (Support) ---
     if pivots_low:
-        candidates_anchor_low = [p for p in pivots_low if p[2] < curr_idx - 15]
-        if candidates_anchor_low:
-            anchor_low = min(candidates_anchor_low, key=lambda x: x[1])
-            lx1, ly1 = anchor_low[2], anchor_low[1]
-            best_sup_line = None
-            for target in pivots_low:
+        # [修改] 重新设计支撑线逻辑
+        # 1. 按照价格从低到高排序，优先尝试连接绝对低点
+        sorted_pivots = sorted(pivots_low, key=lambda x: x[1])
+        # 只取最低的 5 个点作为潜在起点，防止从"半山腰"画线
+        potential_anchors = sorted_pivots[:5] 
+        
+        best_sup_line = None
+        max_dist = 0 # 用距离来衡量线的质量 (越长越好)
+
+        for anchor in potential_anchors:
+            lx1, ly1 = anchor[2], anchor[1]
+            
+            # 必须往右画
+            targets = [p for p in pivots_low if p[2] > lx1 + 5]
+            
+            for target in targets:
                 lx2, ly2 = target[2], target[1]
-                if lx2 <= lx1 + 10: continue
+                
                 m_sup = (ly2 - ly1) / (lx2 - lx1)
                 c_sup = ly1 - m_sup * lx1
+                
+                # 过滤掉斜率太离谱的
+                if abs(m_sup) > 5: continue
+
                 is_valid_sup = True
                 check_start = lx1 + 1
                 check_end = lx2 - 1
-                # [修改] 移除所有校验逻辑，强制显示支撑线
-                # if check_end > check_start:
-                #    ...
-                if is_valid_sup: best_sup_line = (m_sup, c_sup)
-            if best_sup_line:
-                m_sup, c_sup = best_sup_line
-                lp_start = m_sup * vis_start_idx + c_sup
-                lp_end = m_sup * curr_idx + c_sup
-                sup_line = [[(t_start, lp_start), (t_end, lp_end)]]
-                if min_anchor_idx is None or lx1 < min_anchor_idx: min_anchor_idx = lx1
+                
+                if check_end > check_start:
+                    subset_lows = df['low'].iloc[check_start:check_end+1].values
+                    subset_indices = np.arange(check_start, check_end+1)
+                    line_vals = m_sup * subset_indices + c_sup
+                    
+                    # [核心修改] 容错率改得非常严苛 (0.998)，强制线在K线下方
+                    # 这样线就会被"顶"在最下方，类似地板
+                    if np.any(subset_lows < line_vals * 0.95): 
+                        is_valid_sup = False
+                
+                if is_valid_sup:
+                    dist = lx2 - lx1
+                    # 优先选择跨度更长的线
+                    if dist > max_dist:
+                        max_dist = dist
+                        best_sup_line = (m_sup, c_sup)
+        
+        if best_sup_line:
+            m_sup, c_sup = best_sup_line
+            lp_start = m_sup * vis_start_idx + c_sup
+            lp_end = m_sup * curr_idx + c_sup
+            sup_line = [[(t_start, lp_start), (t_end, lp_end)]]
+            # 这里的 anchor 其实不太重要了，主要是为了裁剪
+            # 我们简单取起点的 index
+            if min_anchor_idx is None: min_anchor_idx = sorted_pivots[0][2] 
 
     return pattern_name, res_line, sup_line, min_anchor_idx
 
