@@ -48,57 +48,69 @@ TIME_MARKET_OPEN = time(9, 30)
 TIME_MARKET_SCAN_START = time(10, 0) # 10点才开始报
 TIME_MARKET_CLOSE = time(16, 0)
 
-# --- 核心策略配置 ---
+# --- 核心策略配置 (已添加注释) ---
 CONFIG = {
+    # [1] 过滤器：如果股票触发这些条件，直接忽略 (一票否决)
     "filter": {
-        "max_60d_gain": 0.3,
-        "max_rsi": 60,
-        "max_bias_50": 0.20,
-        "max_upper_shadow": 0.4,
-        "max_day_change": 0.7,
-        "min_vol_ratio": 1.15,
-        "min_bb_squeeze_width": 0.08,
-        "min_bb_expand_width": 0.095,
-        "max_bottom_pos": 0.30,
-        "min_adx_for_squeeze": 15
+        "max_60d_gain": 0.3,          # [防追高] 过去60天涨幅超过 30% 则不看
+        "max_rsi": 60,                # [防过热] RSI(14) 超过 60 则不看 (只做底部)
+        "max_bias_50": 0.20,          # [防回落] 现价偏离 50日均线 20% 以上不看
+        "max_upper_shadow": 0.4,      # [防抛压] 上影线长度占整根K线 40% 以上不看
+        "max_day_change": 0.7,        # [防妖股] 单日涨跌幅超过 70% 不看 (数据异常或妖股)
+        "min_vol_ratio": 1.15,        # [资金门槛] 当前成交量必须 > 20日均量的 1.15倍
+        "min_bb_squeeze_width": 0.08, # [布林带] 之前盘整时的带宽最小值
+        "min_bb_expand_width": 0.095, # [布林带] 现在开口的带宽最小值
+        "max_bottom_pos": 0.30,       # [位置] 价格必须处于过去60天波动区间的底部 30% 区域
+        "min_adx_for_squeeze": 15     # [趋势] ADX 至少要 15 (哪怕是弱趋势)
     },
+
+    # [2] 形态识别
     "pattern": {
-        "pivot_window": 10
+        "pivot_window": 10            # [关键点] 识别高低点时，左右各看 10 根 K 线
     },
+
+    # [3] 系统设置
     "system": {
-        "cooldown_days": 3,
-        "max_charts_per_scan": 5,
-        "history_days": 300
+        "cooldown_days": 3,           # [防刷屏] 同一只股票报警后，3天内不再报警
+        "max_charts_per_scan": 5,     # [防拥堵] 每次扫描最多发送 5 张图表
+        "history_days": 300           # [数据源] 获取过去 300 天的历史数据
     },
+
+    # [4] 打分系统：满足条件加分，分数越高信号越强
     "SCORE": { 
-        "MIN_ALERT_SCORE": 70, 
+        "MIN_ALERT_SCORE": 70,        # [及格线] 总分 >= 70 才报警
+        
+        # 具体的参数阈值
         "PARAMS": {
-            "heavy_vol_multiplier": 1.55, 
-            "adx_strong_threshold": 25,
-            "adx_activation_lower": 20,
-            "kdj_j_oversold": 0,
-            "divergence_price_tolerance": 1.02,
-            "divergence_macd_strength": 0.8,
-            "obv_lookback": 5,
-            "capitulation_vol_mult": 2,      
-            "capitulation_pinbar": 0.5,      
-            "capitulation_mcap": 5_000_000_000 
+            "heavy_vol_multiplier": 1.55,   # [巨量] 量比 > 1.55 倍算巨量
+            "adx_strong_threshold": 25,     # [强趋势] ADX > 25 算强趋势
+            "adx_activation_lower": 20,     # [趋势激活] ADX 从 20 以下拐头向上
+            "kdj_j_oversold": 0,            # [超卖] KDJ 的 J 值小于 0
+            "divergence_price_tolerance": 1.02, # [背离] 价格创新低容差
+            "divergence_macd_strength": 0.8,    # [背离] MACD 强度系数
+            "obv_lookback": 5,              # [资金] OBV 回溯 5 天看趋势
+            "capitulation_vol_mult": 2,     # [抛售高潮] 量比 > 2 倍算恐慌抛售
+            "capitulation_pinbar": 0.5,     # [金针探底] 下影线占比 > 0.5
+            "capitulation_mcap": 5_000_000_000 # (未使用)
         },
+
+        # 每个信号对应的分值
         "WEIGHTS": {
-            "PATTERN_BREAK": 40,   
-            "NX_BREAKOUT": 35,     
-            "BB_SQUEEZE": 30,      
-            "GOD_TIER_NX": 20,     
-            "STRONG_ADX": 20,      
-            "ADX_ACTIVATION": 20,  
-            "OBV_TREND_UP": 15,    
-            "CAPITULATION": 12,    
-            "HEAVY_VOLUME": 10,    
-            "MACD_ZERO_CROSS": 10, 
-            "MACD_DIVERGE": 10,    
-            "KDJ_REBOUND": 8,      
-            "CANDLE_PATTERN": 5    
+            "PATTERN_BREAK": 40,   # 形态突破 (最重要)
+            "NX_BREAKOUT": 35,     # 均线突破
+            "BB_SQUEEZE": 30,      # 布林带挤压突破
+            "GOD_TIER_NX": 20,     # 完美回踩支撑
+            "STRONG_ADX": 20,      # 强趋势确认
+            "ADX_ACTIVATION": 20,  # 趋势刚刚启动
+            "OBV_TREND_UP": 15,    # 资金流入
+            "CAPITULATION": 12,    # 抛售高潮 (恐慌盘)
+            "HEAVY_VOLUME": 10,    # 放量
+            "MACD_ZERO_CROSS": 10, # MACD 金叉
+            "MACD_DIVERGE": 10,    # MACD 底背离
+            "KDJ_REBOUND": 8,      # KDJ 反弹
+            "CANDLE_PATTERN": 5    # K线形态 (吞没/晨星等)
         },
+
         "EMOJI": { 
             100: "TOP", 90: "HIGH", 80: "MID", 70: "LOW", 60: "TEST"
         }
@@ -425,7 +437,6 @@ def identify_patterns(df):
     t_start = df.index[vis_start_idx]
     t_end = df.index[curr_idx]
     
-    # --- 1. 阻力线 (Resistance) ---
     if pivots_high:
         candidates_anchor = [p for p in pivots_high if p[2] < curr_idx - 15]
         if candidates_anchor:
@@ -460,7 +471,6 @@ def identify_patterns(df):
                 curr_price = df['close'].iloc[-1]
                 if curr_price > p_end: pattern_name = "趋势突破 (由守转攻)"
 
-    # --- 2. 支撑线 (Support) ---
     if pivots_low:
         candidates_anchor_low = [p for p in pivots_low if p[2] < curr_idx - 15]
         if candidates_anchor_low:
@@ -689,20 +699,44 @@ def _generate_chart_sync(df, ticker, res_line=[], sup_line=[], stop_price=None, 
     stop_line_data = [stop_price] * total_len
     supp_line_data = [support_price] * total_len
 
+    # --- 修复后的 Clipping Logic (防止报错) ---
     def clip_line_segments(segments):
         new_segments = []
         if not segments: return new_segments
+        
+        # 获取图表可见范围的起始时间戳
         plot_start_date = plot_df.index[0]
         plot_start_ts = plot_start_date.timestamp()
+        
         for seg in segments:
             d1, p1 = seg[0]
             d2, p2 = seg[1]
+            
             try:
+                # 统一转换为 timestamp 进行比较
                 if isinstance(d1, pd.Timestamp): d1_ts = d1.timestamp()
                 else: d1_ts = d1.timestamp()
-                if d1_ts < plot_start_ts and d2.timestamp() < plot_start_ts: continue
-                new_segments.append([(d1, p1), (d2, p2)])
-            except: continue
+                
+                if isinstance(d2, pd.Timestamp): d2_ts = d2.timestamp()
+                else: d2_ts = d2.timestamp()
+
+                # 情况1: 线段完全在图表左侧，丢弃
+                if d2_ts < plot_start_ts:
+                    continue
+                
+                # 情况2: 线段跨越左边界，需要裁剪起点
+                if d1_ts < plot_start_ts:
+                    if d2_ts - d1_ts == 0: continue
+                    # 计算斜率 m = (y2 - y1) / (x2 - x1)
+                    slope = (p2 - p1) / (d2_ts - d1_ts)
+                    # 计算新起点 y = y1 + m * (x_new - x1)
+                    new_p1 = p1 + slope * (plot_start_ts - d1_ts)
+                    new_segments.append([(plot_start_date, new_p1), (d2, p2)])
+                else:
+                    # 情况3: 线段完全在视野内，保留
+                    new_segments.append(seg)
+            except: 
+                continue
         return new_segments
 
     res_line_clipped = clip_line_segments(res_line)
@@ -803,6 +837,7 @@ def _generate_chart_sync(df, ticker, res_line=[], sup_line=[], stop_price=None, 
         
     return buf
 
+# [修改] 增加参数 anchor_idx
 async def generate_chart(df, ticker, res_line=[], sup_line=[], stop_price=None, support_price=None, anchor_idx=None):
     return await asyncio.to_thread(_generate_chart_sync, df, ticker, res_line, sup_line, stop_price, support_price, anchor_idx)
 
@@ -837,18 +872,26 @@ async def update_stats_data():
                 if after_signal.empty: continue
                 signal_price = data['price']
                 if signal_price <= 0: continue
+                
+                # 1D
                 if data.get("ret_1d") is None and len(after_signal) >= 1:
                     price_1d = after_signal.iloc[0]['close']
                     data["ret_1d"] = round(((price_1d - signal_price) / signal_price) * 100, 2)
                     updates_made = True
+                
+                # 5D
                 if data.get("ret_5d") is None and len(after_signal) >= 5:
                     price_5d = after_signal.iloc[4]['close'] 
                     data["ret_5d"] = round(((price_5d - signal_price) / signal_price) * 100, 2)
                     updates_made = True
+                    
+                # 10D
                 if data.get("ret_10d") is None and len(after_signal) >= 10:
                     price_10d = after_signal.iloc[9]['close'] 
                     data["ret_10d"] = round(((price_10d - signal_price) / signal_price) * 100, 2)
                     updates_made = True
+
+                # 20D
                 if data.get("ret_20d") is None and len(after_signal) >= 20:
                     price_20d = after_signal.iloc[19]['close'] 
                     data["ret_20d"] = round(((price_20d - signal_price) / signal_price) * 100, 2)
@@ -864,22 +907,34 @@ def get_level_by_score(score):
     return CONFIG["SCORE"]["EMOJI"].get(60, "TEST") 
 
 def create_alert_embed(ticker, score, price, reason, stop_loss, support, df, filename):
-    if "过滤器" in reason or "STALE" in reason: color = 0x95a5a6 
-    else: color = 0x00ff00 if score >= 80 else 0x3498db
+    level_str = get_level_by_score(score)
+    # [修改] 检查 "过滤器" 关键字
+    if "过滤器" in reason or "STALE" in reason:
+        color = 0x95a5a6 
+    else:
+        color = 0x00ff00 if score >= 80 else 0x3498db
+      
     embed = discord.Embed(title=f"🚨{ticker} 抄底信号 | 得分 {score}", color=color)
     embed.description = f"**现价:** `${price:.2f}`"
+      
     curr = df.iloc[-1]
+      
     ny_now = datetime.now(MARKET_TIMEZONE)
     market_open = ny_now.replace(hour=9, minute=30, second=0, microsecond=0)
     minutes_elapsed = (ny_now - market_open).total_seconds() / 60
+      
     vol_label = "**量比 (预估):**"
     vol_ratio = 0.0
+      
     if 0 < minutes_elapsed < 390:
         proj_factor = get_volume_projection_factor(ny_now, max(minutes_elapsed, 1))
         projected_vol = curr['volume'] * proj_factor
         vol_ratio = projected_vol / df['Vol_MA20'].iloc[-1]
-    else: vol_ratio = curr['volume'] / df['Vol_MA20'].iloc[-1]
+    else:
+        vol_ratio = curr['volume'] / df['Vol_MA20'].iloc[-1]
+      
     obv_status = "流入" if curr['OBV'] > curr['OBV_MA20'] else "流出"
+    
     indicator_text = (
         f"**RSI(14):** `{curr['RSI']:.1f}`\n"
         f"**ADX:** `{curr['ADX']:.1f}`\n"
@@ -888,10 +943,16 @@ def create_alert_embed(ticker, score, price, reason, stop_loss, support, df, fil
         f"**Bias(50):** `{curr['BIAS_50']*100:.1f}%`"
     )
     embed.add_field(name="\u200b", value=indicator_text, inline=True)
-    risk_text = (f"**止损价:** `${stop_loss:.2f}`\n" f"**支撑位:** `${support:.2f}`\n")
+      
+    risk_text = (
+        f"**止损价:** `${stop_loss:.2f}`\n"
+        f"**支撑位:** `${support:.2f}`\n"
+    )
     embed.add_field(name="\u200b", value=risk_text, inline=True)
+      
     embed.add_field(name="\u200b", value=f"```{reason}```", inline=False)
     embed.set_image(url=f"attachment://{filename}")
+      
     return embed
 
 class StockBotClient(discord.Client):
@@ -906,75 +967,127 @@ class StockBotClient(discord.Client):
         logging.info(f'Logged in as {self.user}')
         if ALERT_CHANNEL_ID != 0:
             self.alert_channel = self.get_channel(ALERT_CHANNEL_ID)
-            if self.alert_channel is None: logging.error(f"Could not find channel with ID {ALERT_CHANNEL_ID}")
-        else: logging.warning("No ALERT_CHANNEL_ID provided in env.")
-        if not self.monitor_stocks.is_running(): self.monitor_stocks.start()
-        if not self.scheduled_report.is_running(): self.scheduled_report.start()
+            if self.alert_channel is None:
+                logging.error(f"Could not find channel with ID {ALERT_CHANNEL_ID}")
+        else:
+            logging.warning("No ALERT_CHANNEL_ID provided in env.")
+            
+        if not self.monitor_stocks.is_running():
+            self.monitor_stocks.start()
+        
+        if not self.scheduled_report.is_running():
+            self.scheduled_report.start()
+            
         await self.tree.sync()
 
     async def send_daily_stats_report(self):
         if not self.alert_channel: return
+        
         logging.info("Generating daily backtest report...")
         await update_stats_data()
         load_settings()
+        
         history = settings.get("signal_history", {})
         market_df = await fetch_market_index_data(days=80)
+
         def get_market_ret(date_str, offset_days):
             if market_df is None or market_df.empty: return None
             try:
                 target_date = pd.to_datetime(date_str).normalize()
                 idx = market_df.index.get_indexer([target_date], method='nearest')[0]
+                
                 if idx + offset_days < len(market_df):
                     p_start = market_df.iloc[idx]['price']
                     p_end = market_df.iloc[idx + offset_days]['price']
                     return ((p_end - p_start) / p_start) * 100
             except: pass
             return None
+
         stats_agg = {k: {"s_sum": 0.0, "s_c": 0, "m_sum": 0.0, "m_c": 0, "w": 0} for k in ["1d", "5d", "10d", "20d"]}
+        
         valid_signals = []
         if history:
             sorted_dates = sorted(history.keys(), reverse=True)
             today = datetime.now().date()
+            
             for date_str in sorted_dates:
-                try: signal_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+                try:
+                    sig_date = datetime.strptime(date_str, "%Y-%m-%d").date()
                 except: continue
-                if (today - signal_date).days > 25: continue 
+                if (today - sig_date).days > 25: continue 
+                
                 tickers_data = history[date_str]
                 for ticker, data in tickers_data.items():
                     if data.get("score", 0) == 0: continue 
+                    
                     score = data.get("score", 0)
                     valid_signals.append((date_str, ticker, score, data))
+                    
                     for k, days_off in [("1d", 1), ("5d", 5), ("10d", 10), ("20d", 20)]:
                         m = get_market_ret(date_str, days_off)
                         if m is not None:
                             stats_agg[k]["m_sum"] += m
                             stats_agg[k]["m_c"] += 1
+                        
                         r = data.get(f"ret_{k}")
                         if r is not None:
                             stats_agg[k]["s_sum"] += r
                             stats_agg[k]["s_c"] += 1
                             if r > 0: stats_agg[k]["w"] += 1
+        else:
+            if market_df is not None and not market_df.empty:
+                pass
+
         embed = discord.Embed(title="回测统计", color=0x9b59b6)
+        
         def mk_field(key):
             d = stats_agg[key]
+            
             if d["s_c"] > 0:
                 avg_stock = d["s_sum"] / d["s_c"]
                 avg_stock_str = f"`{avg_stock:+.2f}%`"
                 win_rate = f"`{d['w']/d['s_c']*100:.0f}%`"
-            else: avg_stock, avg_stock_str, win_rate = None, "Wait...", "-"
+            else:
+                avg_stock = None
+                avg_stock_str = "Wait..."
+                win_rate = "-"
+
             if d["m_c"] > 0:
                 avg_market = d["m_sum"] / d["m_c"]
                 avg_market_str = f"`{avg_market:+.2f}%`"
-            else: avg_market, avg_market_str = None, "Wait..."
+            else:
+                if d["s_c"] == 0 and market_df is not None and not market_df.empty:
+                    try:
+                        days_offset = int(key[:-1])
+                        if len(market_df) > days_offset:
+                            p_now = market_df.iloc[-1]['price']
+                            p_prev = market_df.iloc[-(days_offset+1)]['price']
+                            val = ((p_now - p_prev) / p_prev) * 100
+                            avg_market = val
+                            avg_market_str = f"`{val:+.2f}%`"
+                        else:
+                            avg_market = None
+                            avg_market_str = "Wait..."
+                    except:
+                        avg_market = None
+                        avg_market_str = "Wait..."
+                else:
+                    avg_market = None
+                    avg_market_str = "Wait..."
+
             if avg_stock is not None and avg_market is not None and isinstance(avg_market, float):
                 diff = avg_stock - avg_market
                 diff_str = f"**{diff:+.2f}%**"
-            else: diff_str = "-"
+            else:
+                diff_str = "-"
+            
             return f"个股平均: {avg_stock_str}\n纳指同期: {avg_market_str}\n超额收益: {diff_str}\n个股胜率: {win_rate}"
+
         embed.add_field(name="1日表现", value=mk_field("1d"), inline=True)
         embed.add_field(name="5日表现", value=mk_field("5d"), inline=True)
         embed.add_field(name="10日表现", value=mk_field("10d"), inline=True)
         embed.add_field(name="20日表现", value=mk_field("20d"), inline=True)
+        
         recent_list_str = []
         for date_str, ticker, score, data in valid_signals[:5]:
             r1 = data.get("ret_1d")
@@ -985,42 +1098,68 @@ class StockBotClient(discord.Client):
             r10_str = f"{r10:+.1f}%" if r10 is not None else "-"
             r20 = data.get("ret_20d")
             r20_str = f"{r20:+.1f}%" if r20 is not None else "-"
+            
             recent_list_str.append(f"`{date_str}` **{ticker}**\n└ 1D:`{r1_str}` 5D:`{r5_str}` 10D:`{r10_str}` 20D:`{r20_str}`")
-        if recent_list_str: embed.add_field(name="详细情况", value="\n".join(recent_list_str), inline=False)
-        else: embed.add_field(name="详细情况", value="无近期信号", inline=False)
+        
+        if recent_list_str:
+            embed.add_field(name="详细情况", value="\n".join(recent_list_str), inline=False)
+        else:
+            embed.add_field(name="详细情况", value="无近期信号", inline=False)
+
         embed.set_footer(text=f"Report generated at {datetime.now(MARKET_TIMEZONE).strftime('%H:%M:%S')} ET")
         await self.alert_channel.send(embed=embed)
+
+    @tasks.loop(minutes=1)
+    async def scheduled_report(self):
+        now_et = datetime.now(MARKET_TIMEZONE)
+        if now_et.hour == 16 and now_et.minute == 30:
+            today_date = now_et.date()
+            if self.last_report_date != today_date:
+                await self.send_daily_stats_report()
+                self.last_report_date = today_date
 
     @tasks.loop(minutes=5)
     async def monitor_stocks(self):
         if not self.alert_channel: return
         now_et = datetime.now(MARKET_TIMEZONE)
         curr_time, today_str = now_et.time(), now_et.strftime('%Y-%m-%d')
+        
         is_open_scan = TIME_MARKET_SCAN_START <= curr_time <= TIME_MARKET_CLOSE
+        
         if not is_open_scan: return
+        
         logging.info(f"[{now_et.strftime('%H:%M')}] Scanning started...")
         users_data = settings.get("users", {})
         all_tickers = set()
         ticker_user_map = defaultdict(list)
+        
         for uid, udata in users_data.items():
             for k in list(udata['daily_status'].keys()):
                 if not k.endswith(today_str): del udata['daily_status'][k]
             for ticker in udata.get("stocks", []):
                 all_tickers.add(ticker)
                 ticker_user_map[ticker].append(uid)
+
         if not all_tickers: 
             logging.info("No tickers to scan.")
             return
+
         hist_map = await fetch_historical_batch(list(all_tickers))
         quotes_map = {}
-        if TIME_MARKET_OPEN <= curr_time <= TIME_MARKET_CLOSE: quotes_map = await fetch_realtime_quotes(list(all_tickers))
+        if TIME_MARKET_OPEN <= curr_time <= TIME_MARKET_CLOSE:
+            quotes_map = await fetch_realtime_quotes(list(all_tickers))
+
         alerts_buffer = []
         if "signal_history" not in settings: settings["signal_history"] = {}
         if today_str not in settings["signal_history"]: settings["signal_history"][today_str] = {}
+
         for ticker, df_hist in hist_map.items():
             df = df_hist
-            if ticker in quotes_map: df = await asyncio.to_thread(merge_and_recalc_sync, df_hist, quotes_map[ticker])
+            if ticker in quotes_map:
+                df = await asyncio.to_thread(merge_and_recalc_sync, df_hist, quotes_map[ticker])
+            
             if df is None or df.empty: continue
+
             user_ids = ticker_user_map[ticker]
             all_alerted = True
             users_to_ping = []
@@ -1030,78 +1169,117 @@ class StockBotClient(discord.Client):
                 if status == "NONE":
                     users_to_ping.append(uid)
                     all_alerted = False
+            
             if all_alerted: continue
+
             history = settings.get("signal_history", {})
             in_cooldown = False
             cooldown_days = CONFIG["system"]["cooldown_days"]
             last_signal_score = 0
+            
             for i in range(1, cooldown_days + 1): 
                 past_date = (now_et.date() - timedelta(days=i)).strftime("%Y-%m-%d")
                 if past_date in history and ticker in history[past_date]:
                     last_signal_score = history[past_date][ticker].get("score", 0)
                     in_cooldown = True 
+            
+            # [修改] 解包 min_anchor_idx
             is_triggered, score, reason, res_line, sup_line, anchor_idx = await check_signals(df)
+            
             today_signal_data = settings["signal_history"][today_str].get(ticker)
             if today_signal_data:
                 today_score = today_signal_data.get("score", 0)
                 if score <= today_score:
                     is_triggered = False
                     logging.info(f"Ticker {ticker} skipped because a signal with score {today_score} was already sent today.")
+
             if is_triggered and in_cooldown and last_signal_score > 0:
                 if score <= last_signal_score:
                     logging.info(f"Ticker {ticker} skipped due to cooldown (Last Score: {last_signal_score}).")
                     is_triggered = False
+            
             if is_triggered:
                 price = df['close'].iloc[-1]
+                
                 stop_loss, support = calculate_risk_levels(df)
+                
                 alert_obj = {
-                    "ticker": ticker, "score": score, "priority": score, "price": price, "reason": reason,
-                    "support": support, "stop_loss": stop_loss, "df": df,
-                    "res_line": res_line, "sup_line": sup_line, "anchor_idx": anchor_idx, "users": users_to_ping
+                    "ticker": ticker,
+                    "score": score, 
+                    "priority": score, 
+                    "price": price,
+                    "reason": reason,
+                    "support": support,
+                    "stop_loss": stop_loss,
+                    "df": df,
+                    "res_line": res_line,
+                    "sup_line": sup_line,
+                    "anchor_idx": anchor_idx, # [新增] 保存 anchor_idx
+                    "users": users_to_ping
                 }
                 alerts_buffer.append(alert_obj)
+
         if alerts_buffer:
             alerts_buffer.sort(key=lambda x: x["priority"], reverse=True)
             max_charts = CONFIG["system"]["max_charts_per_scan"]
             sent_charts = 0
             summary_list = []
+
             for alert in alerts_buffer:
                 ticker = alert["ticker"]
                 score = alert["score"]
                 users = alert["users"]
+                
                 current_hist = settings["signal_history"][today_str].get(ticker, {})
                 settings["signal_history"][today_str][ticker] = {
-                    "score": score, "price": alert["price"], "time": now_et.strftime('%H:%M'), "reason": alert["reason"],
-                    "ret_1d": current_hist.get("ret_1d"), "ret_5d": current_hist.get("ret_5d"),
-                    "ret_10d": current_hist.get("ret_10d"), "ret_20d": current_hist.get("ret_20d"),
+                    "score": score,
+                    "price": alert["price"],
+                    "time": now_et.strftime('%H:%M'),
+                    "reason": alert["reason"],
+                    "ret_1d": current_hist.get("ret_1d"),
+                    "ret_5d": current_hist.get("ret_5d"),
+                    "ret_10d": current_hist.get("ret_10d"),
+                    "ret_20d": current_hist.get("ret_20d"),
                 }
+                
                 for uid in users:
                     status_key = f"{ticker}-{today_str}"
                     users_data[uid]['daily_status'][status_key] = "MARKET_SENT"
+                
                 mentions = " ".join([f"<@{uid}>" for uid in users])
+                
                 if sent_charts < max_charts:
+                    # [修改] 传递 anchor_idx
                     chart_buf = await generate_chart(
                         alert["df"], ticker, alert["res_line"], alert["sup_line"], 
                         alert["stop_loss"], alert["support"], alert["anchor_idx"]
                     )
                     filename = f"{ticker}.png"
+                    
                     embed = create_alert_embed(
                         ticker, score, alert['price'], alert['reason'], 
                         alert['stop_loss'], alert['support'], alert['df'], filename
                     )
+                    
                     try:
                         file = discord.File(chart_buf, filename=filename)
                         await self.alert_channel.send(content=mentions, embed=embed, file=file)
                         sent_charts += 1
                         await asyncio.sleep(1.5)
                     except Exception as e: logging.error(f"Send Error: {e}")
-                    finally: chart_buf.close() 
-                else: summary_list.append(f"**{ticker}** ({score})")
+                    finally:
+                        chart_buf.close() 
+                else:
+                    summary_list.append(f"**{ticker}** ({score})")
+
             if summary_list:
                 summary_msg = f"**其他提醒 (摘要)**:\n" + " | ".join(summary_list)
-                try: await self.alert_channel.send(content=summary_msg)
+                try: 
+                    await self.alert_channel.send(content=summary_msg)
                 except: pass
+            
             save_settings()
+        
         logging.info(f"[{now_et.strftime('%H:%M')}] Scan finished. Alerts: {len(alerts_buffer)}")
 
 intents = discord.Intents.default()
@@ -1174,10 +1352,13 @@ async def watch_import(interaction: discord.Interaction, preset: app_commands.Ch
 @client.tree.command(name="stats", description="View historical signal accuracy (20-day window)")
 async def stats_command(interaction: discord.Interaction):
     await interaction.response.defer()
+    
     await update_stats_data()
+    
     load_settings()
     history = settings.get("signal_history", {})
     market_df = await fetch_market_index_data(days=80)
+
     def get_market_ret(date_str, offset_days):
         if market_df is None or market_df.empty: return None
         try:
@@ -1187,15 +1368,24 @@ async def stats_command(interaction: discord.Interaction):
                 p_start = market_df.iloc[idx]['price']
                 p_end = market_df.iloc[idx + offset_days]['price']
                 return ((p_end - p_start) / p_start) * 100
-        except: pass
+        except:
+            pass
         return None
-    stats_agg = {k: {"s_sum": 0.0, "s_c": 0, "m_sum": 0.0, "m_c": 0, "w": 0} for k in ["1d", "5d", "10d", "20d"]}
+
+    stats_agg = {
+        k: {"s_sum": 0.0, "s_c": 0, "m_sum": 0.0, "m_c": 0, "w": 0} 
+        for k in ["1d", "5d", "10d", "20d"]
+    }
+    
     seen_tickers = set()
     valid_signals = []
+    
     sorted_dates = sorted(history.keys(), reverse=True)
     today = datetime.now().date()
+    
     for date_str in sorted_dates:
-        try: sig_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+        try:
+            sig_date = datetime.strptime(date_str, "%Y-%m-%d").date()
         except: continue
         
         days_diff = (today - sig_date).days
@@ -1321,6 +1511,7 @@ async def test_command(interaction: discord.Interaction, ticker: str):
     if ticker in quotes_map:
         df = await asyncio.to_thread(merge_and_recalc_sync, df, quotes_map[ticker])
 
+    # [修改] 解包 anchor_idx
     is_triggered, score, reason, r_l, s_l, anchor_idx = await check_signals(df)
     
     price = df['close'].iloc[-1]
@@ -1330,6 +1521,7 @@ async def test_command(interaction: discord.Interaction, ticker: str):
     if not reason: 
         reason = f"无明显信号 (得分: {score})"
     
+    # [修改] 传递 anchor_idx
     chart_buf = await generate_chart(df, ticker, r_l, s_l, stop_loss, support, anchor_idx)
     filename = f"{ticker}_test.png"
     
