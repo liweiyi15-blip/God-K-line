@@ -14,6 +14,7 @@ import aiohttp
 import io
 import matplotlib
 import random
+import warnings # [新增] 用于过滤警告
 
 # [日志配置]
 import logging
@@ -684,8 +685,9 @@ def _generate_chart_sync(df, ticker, res_line=[], sup_line=[], stop_price=None, 
     future_dates = pd.bdate_range(start=last_date + timedelta(days=1), periods=10) 
     future_df = pd.DataFrame(index=future_dates, columns=plot_df.columns)
     
-    # [修改] 忽略 future warnings
-    with pd.option_context("future.no_silent_downcasting", True):
+    # [修改] 修复 FutureWarning (屏蔽空 concat 警告)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=FutureWarning)
         plot_df = pd.concat([plot_df, future_df])
 
     # --- Volume Profile ---
@@ -751,12 +753,12 @@ def _generate_chart_sync(df, ticker, res_line=[], sup_line=[], stop_price=None, 
     # [修改] 底部成交量单色
     volume_color = '#3b404e'
     
-    # [修改] edge/wick 改回 inherit 修复引线消失问题
+    # [核心修复] edge/wick 改回 inherit 修复引线消失问题
     my_marketcolors = mpf.make_marketcolors(
         up='#089981', down='#f23645', 
-        edge='inherit', # 恢复引线和边框颜色
-        wick='inherit', # 恢复引线颜色
-        volume=volume_color, 
+        edge='inherit',    # 保持 inherit，让上下引线有颜色
+        wick='inherit',    # 保持 inherit，让上下引线有颜色
+        volume=volume_color, # 纯色成交量
         ohlc='inherit'
     )
     
@@ -772,7 +774,7 @@ def _generate_chart_sync(df, ticker, res_line=[], sup_line=[], stop_price=None, 
             'axes.edgecolor': grid_color,
             'ytick.left': False, 'ytick.right': True,
             'ytick.labelleft': False, 'ytick.labelright': True,
-            'patch.linewidth': 0, # [修改] 强制去除柱状图边框 (比改成背景色更干净)
+            'patch.linewidth': 0, # [修改] 强制去除柱状图(成交量+K线实体)边框，保留引线(Line)
         }
     )
 
@@ -810,21 +812,21 @@ def _generate_chart_sync(df, ticker, res_line=[], sup_line=[], stop_price=None, 
     )
       
     if seq_of_points:
-        # [修改] 旗形线细度 0.1 -> 0.6, 透明度 1.0 -> 0.4, 颜色调整
+        # [修改] 旗形线细度 0.6, 透明度 0.4
         kwargs['alines'] = dict(
             alines=seq_of_points,
-            colors='#d1d4dc', linewidths=0.6, linestyle='-', alpha=0.4 # Modified here
+            colors='#d1d4dc', linewidths=0.6, linestyle='-', alpha=0.4 
         )
       
     try:
         fig, axlist = mpf.plot(plot_df, **kwargs)
         ax_main = axlist[0]
         
-        # [修改] 中心大标题透明度 0.05
-        ax_main.text(0.5, 0.5, ticker, 
+        # [修改] 中心大标题透明度 0.05, 位置移到上方 (0.5, 0.92)
+        ax_main.text(0.5, 0.92, ticker, 
             transform=ax_main.transAxes, 
             fontsize=60, color='white', alpha=0.05, 
-            ha='center', va='center', weight='bold', zorder=0)
+            ha='center', va='top', weight='bold', zorder=0)
 
         # --- 绘制右侧 Volume Profile (透明度 0.06) ---
         if not valid_df.empty:
