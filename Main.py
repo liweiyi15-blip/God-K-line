@@ -76,7 +76,7 @@ CONFIG = {
 
         # [资金门槛] 量比阈值
         # 含义：当前成交量(或预估量) 必须是 20日均量 的 1.15倍以上。
-        "min_vol_ratio": 1.3,
+        "min_vol_ratio": 1.15,
         
         # --- 布林带挤压 (BB Squeeze) 策略参数 ---
         
@@ -159,7 +159,7 @@ CONFIG = {
 
             # 7. 抛售高潮 (CAPITULATION)
             # 含义：量能必须大于均量的多少倍？
-            "capitulation_vol_mult": 1.7,
+            "capitulation_vol_mult": 2,
             # 含义：下影线比例必须大于多少？(0.5 = 下影线占K线一半以上)
             "capitulation_pinbar": 0.5,
             # 含义：市值小于多少才算小盘股容易被操纵？(50亿)
@@ -560,81 +560,79 @@ def find_pivots(df, window=10):
             
     return pivots_high, pivots_low
 
-# [核心修复] 重写形态识别算法，尝试寻找最贴合的趋势线，而非仅仅连接最高点
+# [核心修复] 重写形态识别算法：改为“外切线”逻辑，确保不切穿中间价格
 def identify_patterns(df):
     if len(df) < 60: return None, [], []
-      
-    # 寻找 Pivot 点 (High/Low)
-    pivots_high, pivots_low = find_pivots(df, window=10)
-      
+    
+    # 获取所有高低点 Pivot
+    pivots_high, pivots_low = find_pivots(df, window=5) # 稍微缩小窗口以捕捉更多细节点
+    
     res_line, sup_line = [], []
     pattern_name = None
-      
-    # 过去 250 天作为全局锚点视窗
+    
+    # 视野起点
     vis_start_idx = max(0, len(df) - 250)
     curr_idx = len(df) - 1
-      
-    # --- 1. 阻力线 (Resistance) ---
-    # 策略改进：不只取绝对最高点，而是尝试前几个最高点作为Anchor，
-    # 找到一条既是下降趋势，又没有被中间K线显著突破的“最佳”外包线。
-    if len(pivots_high) >= 2:
-        # 排除最近 10 天的数据作为 Anchor
-        valid_pivots = [p for p in pivots_high if p[2] < curr_idx - 10]
+    
+    # --- 1. 阻力线 (Resistance) - 优化版：外包络逻辑 ---
+    if pivots_high:
+        # 步骤 A: 寻找“锚点” (Anchor)
+        # 策略：在过去的数据中（排除最近15天，防止近期波动干扰锚点选择），找到最高点作为起点
+        candidates_anchor = [p for p in pivots_high if p[2] < curr_idx - 15]
         
-        if valid_pivots:
-            # 1. 按价格从高到低排序 pivots
-            sorted_pivots = sorted(valid_pivots, key=lambda x: x[1], reverse=True)
-            # 2. 取前 3 个最高点作为候选 Anchor (起点)
-            potential_anchors = sorted_pivots[:3]
-
-            best_res_line_data = None # 存储最佳线的 (m, c, idx_1, idx_2)
-
-            # 3. 遍历候选 Anchor，寻找最佳连线
-            for anchor_high in potential_anchors:
-                idx_1 = anchor_high[2]
-                # 在 Anchor 之后至少 20 天寻找第二点
-                candidates = [p for p in valid_pivots if p[2] > idx_1 + 20]
-
-                if candidates:
-                    # 在后面的点中，仍然选取最高的那个，以形成外包络
-                    target_high = max(candidates, key=lambda x: x[1])
-                    idx_2 = target_high[2]
-                    
-                    # 计算直线方程 y = mx + c
-                    x1, y1 = idx_1, anchor_high[1]
-                    x2, y2 = idx_2, target_high[1]
-                    
-                    if x2 != x1:
-                        m = (y2 - y1) / (x2 - x1)
-                        c = y1 - m * x1
-                        
-                        # 确保是下降趋势或走平 (Flag/Wedge 上轨通常向下)
-                        # 稍微放宽一点到 0.05 允许极其缓慢的上升旗形
-                        if m < 0.05:
-                            # --- 关键验证步骤 ---
-                            # 检查这两个点中间(P1和P2之间)，有没有其他 pivot 高点显著突破了这条线？
-                            # 如果中间有价格大大高出这条线，说明这不是一条好的外包阻力线，被破坏了。
-                            is_valid_line = True
-                            for p in valid_pivots:
-                                p_idx, p_price = p[2], p[1]
-                                # 只检查 P1 和 P2 之间的点
-                                if idx_1 < p_idx < idx_2:
-                                    line_price_at_p = m * p_idx + c
-                                    # 如果中间某个高点超过线 1% (容错率)，认为这条线无效
-                                    if p_price > line_price_at_p * 1.01:
-                                        is_valid_line = False
-                                        break
-                            
-                            if is_valid_line:
-                                # 找到了第一条有效的线。
-                                # 因为我们是按 Anchor 价格从高到低遍历的，所以这仍然是符合条件的最高有效线。
-                                best_res_line_data = (m, c, idx_1, idx_2)
-                                break # 找到最佳，跳出 Anchor 循环
+        if candidates_anchor:
+            # 找到全局最高点作为锚点 (这是你画蓝线的起点)
+            anchor = max(candidates_anchor, key=lambda x: x[1])
+            idx_1, y1 = anchor[2], anchor[1]
             
-            # 4. 如果找到了最佳阻力线，生成绘图数据
-            if best_res_line_data:
-                m, c, idx_1, idx_2 = best_res_line_data
-                # 延伸到视野起点和终点
+            best_line = None
+            max_slope = -float('inf') # 我们要找斜率最大（也就是最接近0，下降最慢）的线
+            
+            # 步骤 B: 寻找第二个点 (Target)
+            # 遍历锚点之后的所有 Pivot
+            for target in pivots_high:
+                idx_2, y2 = target[2], target[1]
+                
+                if idx_2 <= idx_1 + 10: continue # 距离太近不连
+                
+                # 计算斜率 m 和 截距 c
+                m = (y2 - y1) / (idx_2 - idx_1)
+                c = y1 - m * idx_1
+                
+                # 只画下降趋势线 (阻力线通常向下)
+                if m > 0: continue
+                
+                # --- 关键修正：严格的“不切穿”检查 ---
+                # 检查锚点和目标点之间，是否有任何 K 线的高点显著超出了这条线
+                # 只要中间有一个点“冒头”，这条线就作废
+                is_valid = True
+                
+                # 提取中间段的 High 数据进行批量比对 (比循环快)
+                check_start = idx_1 + 1
+                check_end = idx_2 - 1
+                
+                if check_end > check_start:
+                    subset_highs = df['high'].iloc[check_start:check_end+1].values
+                    subset_indices = np.arange(check_start, check_end+1)
+                    line_vals = m * subset_indices + c
+                    
+                    # [修改点] 允许 2% 的容错 (1.02)
+                    if np.any(subset_highs > line_vals * 1.02):
+                        is_valid = False
+                
+                if is_valid:
+                    # 步骤 C: 优选逻辑
+                    # 在所有“合法”的不切穿线中，选择斜率最大（最平缓）的那条
+                    # 这样能保证线是架在所有价格之上的“最外层”
+                    if m > max_slope:
+                        max_slope = m
+                        best_line = (m, c, idx_1, idx_2)
+            
+            # 步骤 D: 生成阻力线数据
+            if best_line:
+                m, c, idx_1, idx_2 = best_line
+                
+                # 延伸线段：从视野起点 到 现在的预测点
                 p_start = m * vis_start_idx + c
                 p_end = m * curr_idx + c
                 
@@ -642,52 +640,50 @@ def identify_patterns(df):
                 t_end = df.index[curr_idx]
                 
                 res_line = [[(t_start, p_start), (t_end, p_end)]]
-                        
-                # --- 2. 支撑线 (Support) ---
-                # 策略：支撑线的寻找逻辑保持不变，在前半段和后半段找最低点连线
-                mid_point_idx = vis_start_idx + (curr_idx - vis_start_idx) * 0.6
                 
-                early_lows = [p for p in pivots_low if p[2] <= mid_point_idx]
-                later_lows = [p for p in pivots_low if p[2] > mid_point_idx]
+                # --- 检测突破 ---
+                curr_price = df['close'].iloc[-1]
+                # 突破必须是当前价格高于线
+                if curr_price > p_end:
+                     pattern_name = "趋势突破 (由守转攻)"
+
+    # --- 2. 支撑线 (Support) - 保持原有逻辑 (寻找底部切线) ---
+    if pivots_low:
+        candidates_anchor_low = [p for p in pivots_low if p[2] < curr_idx - 15]
+        if candidates_anchor_low:
+            anchor_low = min(candidates_anchor_low, key=lambda x: x[1])
+            lx1, ly1 = anchor_low[2], anchor_low[1]
+            
+            best_sup_line = None
+            
+            for target in pivots_low:
+                lx2, ly2 = target[2], target[1]
+                if lx2 <= lx1 + 10: continue
                 
-                if early_lows and later_lows:
-                    # 起点：前半段的最低点
-                    anchor_low = min(early_lows, key=lambda x: x[1])
-                    lx1, ly1 = anchor_low[2], anchor_low[1]
-                    
-                    # 终点：后半段的最低点
-                    target_low = min(later_lows, key=lambda x: x[1])
-                    lx2, ly2 = target_low[2], target_low[1]
-                    
-                    if lx2 != lx1:
-                        m_sup = (ly2 - ly1) / (lx2 - lx1)
-                        c_sup = ly1 - m_sup * lx1
-                        
-                        lp_start = m_sup * vis_start_idx + c_sup
-                        lp_end = m_sup * curr_idx + c_sup
-                        
-                        sup_line = [[(t_start, lp_start), (t_end, lp_end)]]
-                        
-                        # --- 3. 突破验证 & Apex ---
-                        res_today = m * curr_idx + c
-                        curr_price = df['close'].iloc[-1]
-                        
-                        # 计算交点 (Apex)
-                        is_valid_structure = True
-                        if abs(m - m_sup) > 1e-9:
-                            apex_x = (c_sup - c) / (m - m_sup)
-                            # 稍微放宽一点容错，Apex 不能在太远的未来
-                            if curr_idx > apex_x + 15: 
-                                is_valid_structure = False
-                        
-                        # 触发条件：结构有效 + 阻力线向下 + 支撑线收敛(或平行通道)
-                        if is_valid_structure:
-                            # 价格突破阻力线
-                            if curr_price > res_today:
-                                # 防止假突破太远 (5%以内)
-                                if curr_price < res_today * 1.05:
-                                    pattern_name = "形态突破 (旗形/楔形)"
-                                                                    
+                m_sup = (ly2 - ly1) / (lx2 - lx1)
+                c_sup = ly1 - m_sup * lx1
+                
+                is_valid_sup = True
+                check_start = lx1 + 1
+                check_end = lx2 - 1
+                
+                if check_end > check_start:
+                    subset_lows = df['low'].iloc[check_start:check_end+1].values
+                    subset_indices = np.arange(check_start, check_end+1)
+                    line_vals = m_sup * subset_indices + c_sup
+                    # [修改点] 允许 2% 的容错 (0.98)
+                    if np.any(subset_lows < line_vals * 0.98):
+                        is_valid_sup = False
+                
+                if is_valid_sup:
+                    best_sup_line = (m_sup, c_sup)
+
+            if best_sup_line:
+                m_sup, c_sup = best_sup_line
+                lp_start = m_sup * vis_start_idx + c_sup
+                lp_end = m_sup * curr_idx + c_sup
+                sup_line = [[(t_start, lp_start), (t_end, lp_end)]]
+
     return pattern_name, res_line, sup_line
 
 def detect_candle_patterns(df):
