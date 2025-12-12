@@ -48,45 +48,112 @@ TIME_MARKET_OPEN = time(9, 30)
 TIME_MARKET_SCAN_START = time(10, 0) # 10点才开始报
 TIME_MARKET_CLOSE = time(16, 0)
 
-# --- 核心策略配置 ---
+# --- 核心策略配置 (完全注释版) ---
 CONFIG = {
+    # -------------------------------------------------------------------------
+    # [1] 过滤器 (Filter)：一票否决制
+    # -------------------------------------------------------------------------
     "filter": {
+        # [防追高] 60日涨幅限制
+        # 含义：当前价格不能超过 (过去60天最低价 * 1.3)。
         "max_60d_gain": 0.3,
+
+        # [防过热] RSI 超买限制
+        # 含义：RSI(14) 指标不能超过 55。
         "max_rsi": 55,
+
+        # [防回落] 乖离率限制
+        # 含义：现价不能比 50日均线 (MA50) 高出 20%。
         "max_bias_50": 0.20,
+
+        # [防抛压] 上影线限制
+        # 含义：上影线长度不能超过 K线总长度的 40%。
         "max_upper_shadow": 0.4,
+
+        # [防疯牛/妖股] 单日波动限制
+        # 含义：当天涨跌幅绝对值不能超过 70%。
         "max_day_change": 0.7,
+
+        # [资金门槛] 量比阈值
+        # 含义：当前成交量(或预估量) 必须是 20日均量 的 1.3倍以上。
         "min_vol_ratio": 1.3,
+        
+        # --- 布林带挤压 (BB Squeeze) 策略参数 ---
+        
+        # [蓄势条件] 极度压缩阈值
+        # 含义：昨日的布林带带宽 (Bandwidth) 必须小于 8%。
         "min_bb_squeeze_width": 0.08,
+
+        # [启动条件] 开口扩张阈值
+        # 含义：今日的布林带带宽必须扩大到 9.5% 以上。
         "min_bb_expand_width": 0.095,
+
+        # [抄底位置] 底部位置分位数
+        # 含义：当前价格必须处于过去60天价格区间的 30% 分位以下。
         "max_bottom_pos": 0.30,
+        
+        # [趋势潜能] ADX 活跃度
+        # 含义：ADX (趋势强度) 必须大于 15。
         "min_adx_for_squeeze": 15
     },
+
+    # -------------------------------------------------------------------------
+    # [2] 形态识别参数 (Pattern)
+    # -------------------------------------------------------------------------
     "pattern": {
-        "pivot_window": 10  # [修改] 增加窗口大小以过滤噪点
+        # [关键] 枢轴点窗口 (Pivot Window)
+        # 数值 10：意味着这个点必须是前后10天(共21天)内的最高点，才能被连线。
+        # 作用：数值越大，画出的趋势线越跨越长周期（大级别），过滤掉小杂波。
+        "pivot_window": 10
     },
+
+    # -------------------------------------------------------------------------
+    # [3] 系统参数 (System)
+    # -------------------------------------------------------------------------
     "system": {
+        # [防刷屏] 冷却时间
         "cooldown_days": 3,
+
+        # [防拥堵] 单次发送限制
         "max_charts_per_scan": 5,
-        "history_days": 400 # 保证有足够的数据回溯 250 天
+
+        # [数据源] 历史数据回溯天数
+        # 原因：为了画出一年前的大级别形态（如ADBE），必须请求足够长的数据。
+        "history_days": 400
     },
+
+    # -------------------------------------------------------------------------
+    # [4] 打分权重 (Score)
+    # -------------------------------------------------------------------------
     "SCORE": { 
+        # [及格线]
         "MIN_ALERT_SCORE": 70, 
+
+        # [加分项]
         "WEIGHTS": {
-            "PATTERN_BREAK": 40,
-            "NX_BREAKOUT": 35,
-            "BB_SQUEEZE": 30,
-            "GOD_TIER_NX": 20,
-            "STRONG_ADX": 20,
-            "ADX_ACTIVATION": 20,
-            "OBV_TREND_UP": 15,
-            "CAPITULATION": 12,
-            "HEAVY_VOLUME": 10,
-            "MACD_ZERO_CROSS": 10,
-            "MACD_DIVERGE": 10,
-            "KDJ_REBOUND": 8,            
-            "CANDLE_PATTERN": 5
+            # --- 第一梯队：最强信号 ---
+            "PATTERN_BREAK": 40,   # 形态突破
+            "NX_BREAKOUT": 35,     # 均线突破
+            "BB_SQUEEZE": 30,      # 布林挤压
+
+            # --- 第二梯队：趋势确认 ---
+            "GOD_TIER_NX": 20,     # 回踩支撑
+            "STRONG_ADX": 20,      # 强趋势
+            "ADX_ACTIVATION": 20,  # 趋势激活
+
+            # --- 第三梯队：辅助验证 ---
+            "OBV_TREND_UP": 15,    # 资金流入
+            "CAPITULATION": 12,    # 抛售高潮
+            "HEAVY_VOLUME": 10,    # 巨量
+
+            # --- 第四梯队：常规指标 ---
+            "MACD_ZERO_CROSS": 10, 
+            "MACD_DIVERGE": 10,    
+            "KDJ_REBOUND": 8,      
+            "CANDLE_PATTERN": 5    
         },
+
+        # [评级标签]
         "EMOJI": { 
             100: "TOP", 90: "HIGH", 80: "MID", 70: "LOW", 60: "TEST"
         }
@@ -426,7 +493,6 @@ async def fetch_market_index_data(days=60):
             logging.error(f"[Market Index Error] {e}")
     return None
 
-# [修改重点] 寻找高低点：增加回溯范围，增加窗口大小以过滤噪点
 def find_pivots(df, window=10):
     highs = df['high'].values
     lows = df['low'].values
@@ -435,7 +501,7 @@ def find_pivots(df, window=10):
     pivots_high = [] 
     pivots_low = []
       
-    # [修改] 强制回溯 250 天，解决 ADBE 问题
+    # 强制回溯 250 天
     lookback_days = 250
     start_idx = max(0, len(df) - lookback_days)
       
@@ -451,76 +517,111 @@ def find_pivots(df, window=10):
             if lows[i-j] <= current_low or lows[i+j] < current_low:
                 is_low = False
         
+        # 保存 (date, price, index)
         if is_high: pivots_high.append((dates[i], current_high, i))
         if is_low: pivots_low.append((dates[i], current_low, i))
             
     return pivots_high, pivots_low
 
-# [修改重点] 形态识别：增加交点(Apex)逻辑，防止 MSFT 那种右侧误报
+# [核心修复] 重写形态识别算法，完全复刻 TrendSpider 的画法
 def identify_patterns(df):
     if len(df) < 60: return None, [], []
       
-    # 使用更大的 window
     pivots_high, pivots_low = find_pivots(df, window=10)
-      
+    
     res_line, sup_line = [], []
     pattern_name = None
-
-    # 画图可视化的起点，设为 250 天前
-    vis_start_idx = max(0, len(df) - 250) 
+    
+    # 过去 250 天的总高低点（作为全局锚点）
+    vis_start_idx = max(0, len(df) - 250)
     curr_idx = len(df) - 1
-      
-    t_end = df.index[curr_idx]
-    t_start = df.index[vis_start_idx]
-
+    
+    # --- 1. 阻力线 (Resistance) ---
+    # 策略：找到全局最高点 (Global Max) 作为起点，连接右侧最高的点
+    # 这确保了阻力线是从“山顶”压下来的，而不是半山腰
     if len(pivots_high) >= 2:
-        ph1, ph2 = pivots_high[-2], pivots_high[-1]
-        x1, y1 = ph1[2], ph1[1]
-        x2, y2 = ph2[2], ph2[1]
+        # 排除最近 10 天的数据作为 Anchor，防止刚形成的高点就画长线
+        valid_pivots = [p for p in pivots_high if p[2] < curr_idx - 10]
         
-        if x2 != x1:
-            m_res = (y2 - y1) / (x2 - x1)
-            c_res = y1 - m_res * x1
+        if valid_pivots:
+            # 找到价格最高的点 (TrendSpider 逻辑)
+            anchor_high = max(valid_pivots, key=lambda x: x[1]) 
+            idx_1 = anchor_high[2]
             
-            p_start = m_res * vis_start_idx + c_res
-            p_end = m_res * curr_idx + c_res
+            # 在 Anchor 之后，寻找第二点
+            # 必须在 Anchor 之后至少 20 天，才有资格构成长期趋势
+            candidates = [p for p in valid_pivots if p[2] > idx_1 + 20]
             
-            # 只有当阻力线是向下倾斜或走平时才画
-            if m_res < 0.05: 
-                res_line = [[(t_start, p_start), (t_end, p_end)]]
-
-                if len(pivots_low) >= 2:
-                    pl1, pl2 = pivots_low[-2], pivots_low[-1]
-                    lx1, ly1 = pl1[2], pl1[1]
-                    lx2, ly2 = pl2[2], pl2[1]
+            if candidates:
+                # 在 Anchor 之后的所有高点中，找最高的那个 (或者最能构成切线的)
+                # 这里简单取最高点，通常就是 TrendSpider 的画法 (外包络线)
+                target_high = max(candidates, key=lambda x: x[1])
+                idx_2 = target_high[2]
+                
+                # 计算直线方程 y = mx + c
+                x1, y1 = idx_1, anchor_high[1]
+                x2, y2 = idx_2, target_high[1]
+                
+                if x2 != x1:
+                    m = (y2 - y1) / (x2 - x1)
+                    c = y1 - m * x1
                     
-                    if lx2 != lx1:
-                        m_sup = (ly2 - ly1) / (lx2 - lx1)
-                        c_sup = ly1 - m_sup * lx1
+                    # 只有下降趋势或走平才画 (Flag/Wedge 上轨通常向下)
+                    if m < 0.05:
+                        # 延伸到当前
+                        p_start = m * vis_start_idx + c
+                        p_end = m * curr_idx + c
                         
-                        lp_start = m_sup * vis_start_idx + c_sup
-                        lp_end = m_sup * curr_idx + c_sup
+                        t_start = df.index[vis_start_idx]
+                        t_end = df.index[curr_idx]
                         
-                        sup_line = [[(t_start, lp_start), (t_end, lp_end)]]
+                        res_line = [[(t_start, p_start), (t_end, p_end)]]
                         
-                        # [核心修改] 交点 (Apex) 验证逻辑
-                        curr_price = df['close'].iloc[-1]
-                        res_today = m_res * curr_idx + c_res
+                        # --- 2. 支撑线 (Support) ---
+                        # 策略：强制在时间轴的“前半段”找低点作为起点，避免线缩在右下角
+                        # 找到区间前 60% 时间内的最低点
+                        mid_point_idx = vis_start_idx + (curr_idx - vis_start_idx) * 0.6
                         
-                        is_valid_structure = True
-                        # 计算交点
-                        if abs(m_res - m_sup) > 1e-9:
-                            apex_x = (c_sup - c_res) / (m_res - m_sup)
-                            # 如果当前 K 线位置已经跑到交点右侧很远，说明形态已失效
-                            if curr_idx > apex_x + 5:
-                                is_valid_structure = False
+                        early_lows = [p for p in pivots_low if p[2] <= mid_point_idx]
+                        later_lows = [p for p in pivots_low if p[2] > mid_point_idx]
                         
-                        if is_valid_structure and m_res < 0.005 and (m_sup > m_res):
-                             if curr_price > res_today:
-                                 # 新鲜度检查
-                                 if curr_price < res_today * 1.05:
-                                     pattern_name = "形态突破 (三角/楔形)"
-   
+                        if early_lows and later_lows:
+                            # 起点：前半段的最低点
+                            anchor_low = min(early_lows, key=lambda x: x[1])
+                            lx1, ly1 = anchor_low[2], anchor_low[1]
+                            
+                            # 终点：后半段的最低点
+                            target_low = min(later_lows, key=lambda x: x[1])
+                            lx2, ly2 = target_low[2], target_low[1]
+                            
+                            if lx2 != lx1:
+                                m_sup = (ly2 - ly1) / (lx2 - lx1)
+                                c_sup = ly1 - m_sup * lx1
+                                
+                                lp_start = m_sup * vis_start_idx + c_sup
+                                lp_end = m_sup * curr_idx + c_sup
+                                
+                                sup_line = [[(t_start, lp_start), (t_end, lp_end)]]
+                                
+                                # --- 3. 突破验证 & Apex ---
+                                res_today = m * curr_idx + c
+                                curr_price = df['close'].iloc[-1]
+                                
+                                # 计算交点
+                                is_valid_structure = True
+                                if abs(m - m_sup) > 1e-9:
+                                    apex_x = (c_sup - c) / (m - m_sup)
+                                    if curr_idx > apex_x + 10: # 稍微放宽一点容错
+                                        is_valid_structure = False
+                                
+                                # 触发条件：结构有效 + 阻力线向下 + 支撑线收敛(或平行通道)
+                                if is_valid_structure:
+                                    # 价格突破阻力线
+                                    if curr_price > res_today:
+                                        # 防止假突破太远
+                                        if curr_price < res_today * 1.05:
+                                            pattern_name = "形态突破 (旗形/楔形)"
+                                            
     return pattern_name, res_line, sup_line
 
 def detect_candle_patterns(df):
@@ -1023,7 +1124,6 @@ class StockBotClient(discord.Client):
 
             if d["m_c"] > 0:
                 avg_market = d["m_sum"] / d["m_c"]
-                avg_market_str = f"`{avg_market:+.2f}%`"
             else:
                 if d["s_c"] == 0 and market_df is not None and not market_df.empty:
                     try:
@@ -1033,16 +1133,17 @@ class StockBotClient(discord.Client):
                             p_prev = market_df.iloc[-(days_offset+1)]['price']
                             val = ((p_now - p_prev) / p_prev) * 100
                             avg_market = val
-                            avg_market_str = f"`{val:+.2f}%`"
                         else:
                             avg_market = None
-                            avg_market_str = "Wait..."
                     except:
                         avg_market = None
-                        avg_market_str = "Wait..."
                 else:
                     avg_market = None
-                    avg_market_str = "Wait..."
+
+            if avg_market is not None and isinstance(avg_market, float):
+                avg_market_str = f"`{avg_market:+.2f}%`"
+            else:
+                avg_market_str = "Wait..."
 
             if avg_stock is not None and avg_market is not None and isinstance(avg_market, float):
                 diff = avg_stock - avg_market
@@ -1395,7 +1496,6 @@ async def stats_command(interaction: discord.Interaction):
 
         if d["m_c"] > 0:
             avg_market = d["m_sum"] / d["m_c"]
-            avg_market_str = f"`{avg_market:+.2f}%`"
         else:
             if d["s_c"] == 0 and market_df is not None and not market_df.empty:
                 try:
@@ -1405,16 +1505,17 @@ async def stats_command(interaction: discord.Interaction):
                         p_prev = market_df.iloc[-(days_offset+1)]['price']
                         val = ((p_now - p_prev) / p_prev) * 100
                         avg_market = val
-                        avg_market_str = f"`{val:+.2f}%`"
                     else:
                         avg_market = None
-                        avg_market_str = "Wait..."
                 except:
                     avg_market = None
-                    avg_market_str = "Wait..."
             else:
                 avg_market = None
-                avg_market_str = "Wait..."
+        
+        if avg_market is not None and isinstance(avg_market, float):
+            avg_market_str = f"`{avg_market:+.2f}%`"
+        else:
+            avg_market_str = "Wait..."
 
         if avg_stock is not None and avg_market is not None and isinstance(avg_market, float):
             diff = avg_stock - avg_market
