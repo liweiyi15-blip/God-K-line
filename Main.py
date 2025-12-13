@@ -96,7 +96,7 @@ CONFIG = {
         "RESONANCE": {
             "window_days": 5,         # [窗口] 回溯过去 5 天寻找背离信号
             "min_signals": 2,         # [阈值] 至少需要 2 个指标同时背离才算共振
-            "bonus_score": 30         # [加分] 达成共振后的奖励分数
+            "bonus_score": 25         # [加分] 达成共振后的奖励分数
         },
 
         # [4.2] 策略参数
@@ -128,8 +128,8 @@ CONFIG = {
             "HEAVY_INSTITUTIONAL": 20, # [量能] 纯粹的机构异动 (高 RVOL)
             
             "MACD_ZERO_CROSS": 10,  # [指标] MACD 0轴金叉
-            "MACD_DIVERGE": 10,     # [指标] MACD 底背离 (常规)
-            "KDJ_REBOUND": 5,      # [指标] KDJ 超卖反弹
+            "MACD_DIVERGE": 15,     # [指标] MACD 底背离 (常规)
+            "KDJ_REBOUND": 10,      # [指标] KDJ 超卖反弹
             "CANDLE_PATTERN": 5     # [K线] 吞没/晨星/锤子
         },
 
