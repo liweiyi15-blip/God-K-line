@@ -49,7 +49,7 @@ TIME_MARKET_OPEN = time(9, 30)
 TIME_MARKET_SCAN_START = time(10, 0) # 10点才开始报
 TIME_MARKET_CLOSE = time(16, 0)
 
-# --- 核心策略配置 (RVOL 加强版 + 四维共振 + 全动态布林 + 可配旗形) ---
+# --- 核心策略配置 (RVOL 加强版 + 四维共振 + 动态布林) ---
 CONFIG = {
     # [1] 过滤器：左侧抄底核心 (一票否决制)
     "filter": {
@@ -57,15 +57,13 @@ CONFIG = {
         "max_rsi": 60,                # [防过热] RSI(14) 超过 60 则不看
         "max_bias_50": 0.20,          # [防回落] 现价偏离 50日均线 20% 以上不看
         "max_upper_shadow": 0.4,      # [防抛压] 上影线长度占整根K线 40% 以上不看
-        "max_day_change": 0.07,       # [防妖股] 单日涨跌幅超过 7% 不看
+        "max_day_change": 0.7,        # [防妖股] 单日涨跌幅超过 70% 不看
         
         "min_rvol": 1.2,              # [核心] RVOL 必须 > 1.2 (比历史同期活跃20%以上)
         
-        # [布林带动态配置 - 全动态版]
-        "bb_squeeze_days": 5,         # [挤压窗口] 回溯考察过去多少天
-        "bb_squeeze_tolerance": 0.03, # [带宽稳定] 考察期内，带宽最大值与最小值的差需小于此值
-        "max_consolidation_amp": 0.05,# [股价横盘] 考察期内，股价(High-Low)/Low 的振幅需小于 5%
-        "bb_expansion_rate": 1.2,     # [动态扩张] 今天带宽 / 考察期平均带宽 >= 1.2 (扩大20%)
+        # [布林带动态配置 - 修改部分]
+        "min_bb_squeeze_width": 0.10, # [前置条件] 昨日带宽需小于此值 (定义什么是"窄")
+        "bb_expansion_rate": 1.2,     # [动态扩张] 今天带宽 / 昨天带宽 >= 1.2 (即扩大20%才算开口)
         
         "max_bottom_pos": 0.30,       # [位置] 价格在过去60天区间的位置 (0.3表示底部30%)
         "min_adx_for_squeeze": 15     # [趋势] ADX 最小门槛，确保不是死水
@@ -73,11 +71,7 @@ CONFIG = {
 
     # [2] 形态识别
     "pattern": {
-        "pivot_window": 10,           # [关键点] 识别高低点的前后窗口天数
-        
-        # [旗形支撑 - 横盘整理参数]
-        "support_tolerance": 0.02,    # [宽容度] 价格在支撑线(上下2%)范围内视为"踩稳/横盘"
-        "support_window": 4           # [企稳天数] 检查过去4天是否有触碰支撑的行为 (确认支撑有效)
+        "pivot_window": 10            # [关键点] 识别高低点的前后窗口天数
     },
 
     # [3] 系统设置
@@ -128,7 +122,7 @@ CONFIG = {
             
             "MACD_ZERO_CROSS": 10,  # [指标] MACD 0轴金叉
             "MACD_DIVERGE": 10,     # [指标] MACD 底背离 (常规)
-            "KDJ_REBOUND": 5,       # [指标] KDJ 超卖反弹
+            "KDJ_REBOUND": 5,      # [指标] KDJ 超卖反弹
             "CANDLE_PATTERN": 5     # [K线] 吞没/晨星/锤子
         },
 
@@ -733,17 +727,13 @@ def check_signals_sync(df, ticker): # [修改] 传入 ticker
     # ============================================================
     pattern_name, res_line, sup_line, anchor_idx, sup_slope, sup_intercept = identify_patterns(df)
     
-    # [新增] 读取旗形参数
-    sup_tolerance = CONFIG["pattern"]["support_tolerance"]
-    sup_window = CONFIG["pattern"]["support_window"]
-    
     # 判断是否处于“支撑线”附近 (为了给“底部休眠”发免死金牌)
     is_structure_support = False
     if sup_slope is not None:
         curr_idx = len(df) - 1
         curr_sup_price = sup_slope * curr_idx + sup_intercept
-        # 根据配置的宽容度计算
-        if (1 - sup_tolerance/2) <= curr['close'] / curr_sup_price <= (1 + sup_tolerance):
+        # 如果当前价格在支撑线附近 (0.98 ~ 1.03)
+        if 0.98 <= curr['close'] / curr_sup_price <= 1.03:
             is_structure_support = True
     # ============================================================
 
@@ -788,38 +778,22 @@ def check_signals_sync(df, ticker): # [修改] 传入 ticker
 
     # --- 纯粹抄底信号逻辑 ---
     
-    # [A] 布林带挤压 + 低位 (全动态逻辑)
-    bb_squeeze_days = CONFIG["filter"]["bb_squeeze_days"]
-    bb_squeeze_tol = CONFIG["filter"]["bb_squeeze_tolerance"]
+    # [A] 布林带挤压 + 低位 (修改为动态比例)
+    bb_squeeze_limit = CONFIG["filter"]["min_bb_squeeze_width"]
     bb_expand_rate = CONFIG["filter"]["bb_expansion_rate"]
-    max_cons_amp = CONFIG["filter"].get("max_consolidation_amp", 0.05)
     max_pos = CONFIG["filter"]["max_bottom_pos"]
     price_pos = (curr['close'] - low_60) / (high_60 - low_60) if high_60 > low_60 else 0.5
     
-    if len(df) > bb_squeeze_days + 1:
-        # 提取过去 N 天（不含今天）的数据
-        past_widths = df['BB_Width'].iloc[-(bb_squeeze_days+1):-1]
-        past_closes = df['close'].iloc[-(bb_squeeze_days+1):-1]
+    if prev['BB_Width'] < bb_squeeze_limit: 
+        # 计算扩张比例
+        prev_width_safe = prev['BB_Width'] if prev['BB_Width'] > 0 else 0.001
+        width_ratio = curr['BB_Width'] / prev_width_safe
         
-        # 计算过去几天的带宽极差 (Max - Min)
-        width_diff = past_widths.max() - past_widths.min()
-        
-        # 计算过去几天的股价振幅 (High - Low) / Low (简化为 MaxClose-MinClose / MinClose)
-        price_amp = (past_closes.max() - past_closes.min()) / past_closes.min()
-        
-        # 逻辑：过去稳定（带宽波动小 + 股价横盘）+ 今天爆发
-        is_stable_width = width_diff <= bb_squeeze_tol
-        is_sideways_price = price_amp <= max_cons_amp
-        
-        if is_stable_width and is_sideways_price:
-            avg_width = past_widths.mean()
-            width_ratio = curr['BB_Width'] / avg_width if avg_width > 0 else 1.0
-            
-            if width_ratio >= bb_expand_rate:
-                if curr['close'] > curr['open']: # 必须收阳
-                    if price_pos <= max_pos: # 必须低位
-                        triggers.append(f"BB Squeeze: 盘整启动 (稳{bb_squeeze_days}日, 扩{width_ratio:.2f}x)")
-                        score += weights["BB_SQUEEZE"]
+        if width_ratio >= bb_expand_rate: 
+            if curr['close'] > curr['open']: 
+                 if price_pos <= max_pos: 
+                    triggers.append(f"BB Squeeze: 变盘启动 (前宽:{prev['BB_Width']:.3f}, 扩张:{width_ratio:.2f}x)")
+                    score += weights["BB_SQUEEZE"]
 
     # [B] ADX 趋势启动
     is_strong_trend = curr['ADX'] > params["adx_strong_threshold"] and curr['PDI'] > curr['MDI']
@@ -848,22 +822,21 @@ def check_signals_sync(df, ticker): # [修改] 传入 ticker
         def get_sup_price(idx): return sup_slope * idx + sup_intercept
         
         curr_sup = get_sup_price(curr_idx)
-        # 使用动态宽容度配置
-        is_on_support_now = (1 - sup_tolerance/2) <= curr['close'] / curr_sup <= (1 + sup_tolerance)
+        is_on_support_now = (curr['close'] >= curr_sup * 0.995) and (curr['close'] <= curr_sup * 1.02)
         
         if is_on_support_now:
-            # 条件A: 触底企稳 (使用配置的回溯窗口)
+            # 条件A: 触底企稳
             was_touching = False
-            start_check_idx = max(0, curr_idx - sup_window)
+            start_check_idx = max(0, curr_idx - 4)
             for i in range(start_check_idx, curr_idx):
                 sup_at_i = get_sup_price(i)
                 low_at_i = df['low'].iloc[i]
-                if low_at_i <= sup_at_i * (1 + sup_tolerance):
+                if low_at_i <= sup_at_i * 1.02:
                     was_touching = True
                     break
             
             if was_touching:
-                triggers.append(f"旗形支撑: 触底企稳 ({sup_window}日确认)")
+                triggers.append("旗形支撑: 触底企稳 (4日确认)")
                 score += weights["PATTERN_SUPPORT"]
                 pattern_scored = True
             
@@ -915,6 +888,9 @@ def check_signals_sync(df, ticker): # [修改] 传入 ticker
             score += weights["CAPITULATION"]
 
     # [新增] 四维共振逻辑 (4D Resonance)
+    # 检测过去 N 天内是否发生了指标的底背离信号
+    # 需要满足：CROSS(指标, 信号线) 且 当前PriceLow < 上一次Cross时的PriceLow 且 当前Indicator > 上一次Cross时的Indicator
+    
     res_cfg = CONFIG["SCORE"]["RESONANCE"]
     res_window = res_cfg["window_days"]
     
@@ -1023,7 +999,7 @@ def _generate_chart_sync(df, ticker, res_line=[], sup_line=[], stop_price=None, 
     else:
         vol_bull, vol_bear, bin_centers, bar_height = [], [], [], 0
 
-    total_len = len(plot_df)                  
+    total_len = len(plot_df)                 
     if stop_price is None: stop_price = df['close'].iloc[-1] * 0.95
     if support_price is None: support_price = df['close'].iloc[-1] * 0.90
     stop_line_data = [stop_price] * total_len
@@ -1162,81 +1138,117 @@ def _generate_chart_sync(df, ticker, res_line=[], sup_line=[], stop_price=None, 
         
     return buf
 
-# -----------------------------------------------------------------------------
-# [FIXED] 补充缺失的 Embed 生成函数 (标题固定版)
-# -----------------------------------------------------------------------------
-def create_alert_embed(ticker, score, price, reason, stop_loss, support, df, filename, rvol=None, is_filtered=False):
-    """
-    生成完美复刻图片排版的 Embed 对象 (固定标题)
-    """
-    # 标题永远固定格式，不再根据分数变化
-    title = f"🚨 {ticker} 抄底信号 | 得分 {score}"
-    
-    # 颜色也统一固定为红色 (匹配 🚨 图标)，保持视觉一致性
-    color = 0xe74c3c # 红色
-
-    embed = discord.Embed(
-        title=title,
-        description=f"**现价:** `${price:.2f}`",
-        color=color,
-        timestamp=datetime.now(MARKET_TIMEZONE)
-    )
-
-    # 2. 准备指标数据
-    if not df.empty:
-        curr = df.iloc[-1]
-        
-        # 格式化数值，使用 `code` 样式
-        rsi_val = f"{curr['RSI']:.1f}" if 'RSI' in df.columns else "N/A"
-        adx_val = f"{curr['ADX']:.1f}" if 'ADX' in df.columns else "N/A"
-        rvol_val = f"{rvol:.2f}x" if rvol is not None else "1.00x"
-        bias_val = f"{curr['BIAS_50']*100:.1f}%" if 'BIAS_50' in df.columns else "N/A"
-        
-        # 简易 OBV 状态判断
-        obv_val = curr['OBV'] if 'OBV' in df.columns else 0
-        obv_ma = curr['OBV_MA20'] if 'OBV_MA20' in df.columns else 0
-        obv_status = "流入" if obv_val > obv_ma else "流出"
-
-        # 3. 构建双列布局 (使用 Zero Width Space \u200b 作为字段名以隐藏标题)
-        
-        # 左列：技术指标
-        left_col = (
-            f"**RSI(14):** `{rsi_val}`\n"
-            f"**ADX:** `{adx_val}`\n"
-            f"**RVOL:** `{rvol_val}`\n"
-            f"**OBV:** `{obv_status}`\n"
-            f"**Bias(50):** `{bias_val}`"
-        )
-        
-        # 右列：价格水平
-        right_col = (
-            f"**止损价:** `${stop_loss:.2f}`\n"
-            f"**支撑位:** `${support:.2f}`"
-        )
-
-        embed.add_field(name="\u200b", value=left_col, inline=True)
-        embed.add_field(name="\u200b", value=right_col, inline=True)
-
-    # 4. 底部灰色信息框 (Reason)
-    # 将理由放入代码块中以实现灰色背景效果
-    if reason:
-        embed.add_field(name="\u200b", value=f"```\n{reason}\n```", inline=False)
-    else:
-        embed.add_field(name="\u200b", value="```\n无额外详细信息\n```", inline=False)
-
-    # 5. 图片与页脚
-    embed.set_image(url=f"attachment://{filename}")
-    embed.set_footer(text=f"StockBot Analysis | {ticker}")
-    
-    return embed
+async def generate_chart(df, ticker, res_line=[], sup_line=[], stop_price=None, support_price=None, anchor_idx=None):
+    return await asyncio.to_thread(_generate_chart_sync, df, ticker, res_line, sup_line, stop_price, support_price, anchor_idx)
 
 async def update_stats_data():
-    """
-    占位符函数：更新历史信号的回测数据。
-    防止 stats 命令调用未定义函数导致崩溃。
-    """
-    # 这里可以添加更新逻辑，目前留空以确保代码运行
-    pass
+    if "signal_history" not in settings: return
+    updates_made = False
+    symbols_to_check = set()
+    history = settings["signal_history"]
+    for date_str, tickers_data in history.items():
+        try:
+            signal_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+        except ValueError: continue
+        today = datetime.now().date()
+        if signal_date >= today: continue 
+        for ticker, data in tickers_data.items():
+            need_1d = data.get("ret_1d") is None
+            need_5d = data.get("ret_5d") is None and (today - signal_date).days > 5
+            need_10d = data.get("ret_10d") is None and (today - signal_date).days > 10
+            need_20d = data.get("ret_20d") is None and (today - signal_date).days > 20
+            if need_1d or need_5d or need_10d or need_20d: symbols_to_check.add(ticker)
+            
+    if not symbols_to_check: return
+    data_map = await fetch_historical_batch(list(symbols_to_check), days=60)
+    
+    for date_str, tickers_data in history.items():
+        signal_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+        for ticker, data in tickers_data.items():
+            if ticker not in data_map: continue
+            df = data_map[ticker]
+            try:
+                after_signal = df[df.index.date > signal_date]
+                if after_signal.empty: continue
+                signal_price = data['price']
+                if signal_price <= 0: continue
+                
+                # 1D
+                if data.get("ret_1d") is None and len(after_signal) >= 1:
+                    price_1d = after_signal.iloc[0]['close']
+                    data["ret_1d"] = round(((price_1d - signal_price) / signal_price) * 100, 2)
+                    updates_made = True
+                
+                # 5D
+                if data.get("ret_5d") is None and len(after_signal) >= 5:
+                    price_5d = after_signal.iloc[4]['close'] 
+                    data["ret_5d"] = round(((price_5d - signal_price) / signal_price) * 100, 2)
+                    updates_made = True
+                    
+                # 10D
+                if data.get("ret_10d") is None and len(after_signal) >= 10:
+                    price_10d = after_signal.iloc[9]['close'] 
+                    data["ret_10d"] = round(((price_10d - signal_price) / signal_price) * 100, 2)
+                    updates_made = True
+
+                # 20D
+                if data.get("ret_20d") is None and len(after_signal) >= 20:
+                    price_20d = after_signal.iloc[19]['close'] 
+                    data["ret_20d"] = round(((price_20d - signal_price) / signal_price) * 100, 2)
+                    updates_made = True
+            except: pass
+    if updates_made: save_settings()
+
+def get_level_by_score(score): 
+    if score >= 100: return CONFIG["SCORE"]["EMOJI"].get(100, "TOP")
+    if score >= 90: return CONFIG["SCORE"]["EMOJI"].get(90, "HIGH")
+    if score >= 80: return CONFIG["SCORE"]["EMOJI"].get(80, "MID")
+    if score >= 70: return CONFIG["SCORE"]["EMOJI"].get(70, "LOW")
+    return CONFIG["SCORE"]["EMOJI"].get(60, "TEST") 
+
+def create_alert_embed(ticker, score, price, reason, stop_loss, support, df, filename, rvol=None, is_filtered=False):
+    level_str = get_level_by_score(score)
+    if "过滤器" in reason or "STALE" in reason:
+        color = 0x95a5a6 
+    else:
+        color = 0x00ff00 if score >= 80 else 0x3498db
+    
+    # 标题如果包含不支持的格式字符可能显示异常，故状态在描述中体现
+    title_text = f"🚨{ticker} 抄底信号 | 得分 {score}"
+    if is_filtered:
+        title_text = f"🚫{ticker} 信号拦截 | 得分 {score} (低分)"
+        color = 0x7f8c8d
+      
+    embed = discord.Embed(title=title_text, color=color)
+    
+    # 描述部分支持 markdown 删除线
+    score_display = f"~~{score}~~" if is_filtered else f"{score}"
+    embed.description = f"**现价:** `${price:.2f}`\n**得分:** {score_display}"
+      
+    curr = df.iloc[-1]
+    obv_status = "流入" if curr['OBV'] > curr['OBV_MA20'] else "流出"
+    
+    vol_str = f"`{rvol:.2f}x`" if rvol else "N/A"
+    
+    indicator_text = (
+        f"**RSI(14):** `{curr['RSI']:.1f}`\n"
+        f"**ADX:** `{curr['ADX']:.1f}`\n"
+        f"**RVOL:** {vol_str}\n" 
+        f"**OBV:** `{obv_status}`\n"
+        f"**Bias(50):** `{curr['BIAS_50']*100:.1f}%`"
+    )
+    embed.add_field(name="\u200b", value=indicator_text, inline=True)
+      
+    risk_text = (
+        f"**止损价:** `${stop_loss:.2f}`\n"
+        f"**支撑位:** `${support:.2f}`\n"
+    )
+    embed.add_field(name="\u200b", value=risk_text, inline=True)
+      
+    embed.add_field(name="\u200b", value=f"```{reason}```", inline=False)
+    embed.set_image(url=f"attachment://{filename}")
+      
+    return embed
 
 class StockBotClient(discord.Client):
     def __init__(self, *, intents: discord.Intents):
@@ -1578,9 +1590,6 @@ class StockBotClient(discord.Client):
         
         logging.info(f"[{now_et.strftime('%H:%M')}] Scan finished. Alerts: {len(alerts_buffer)}")
 
-# -----------------------------------------------------------------------------
-# [Critical Fix] Must instantiate client BEFORE decorators
-# -----------------------------------------------------------------------------
 intents = discord.Intents.default()
 client = StockBotClient(intents=intents)
 
