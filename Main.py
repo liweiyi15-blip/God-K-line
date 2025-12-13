@@ -84,8 +84,8 @@ CONFIG = {
     # [2] 形态识别
     "pattern": {
         "pivot_window": 10,           # [关键点] 识别高低点的前后窗口天数
-        "support_tolerance": 0.02,    # 新增配置
-        "support_window": 3           # 新增配置
+        "support_tolerance": 0.02,    # [容差] 允许股价偏离支撑位 2% 仍视为触碰
+        "support_window": 3           # [确认] 回溯过去 3 天确认支撑有效性
     },
 
     # [3] 系统设置
@@ -200,7 +200,7 @@ def get_user_data(user_id):
     return settings["users"][uid_str]
 
 # -----------------------------------------------------------------------------
-# [核心] RVOL 计算器 - 已修改：支持开盘前获取，识别冬夏令时，缩短回溯时间
+# [核心] RVOL 计算器 - 已修改：支持开盘前获取，识别冬夏令时，URL格式修正
 # -----------------------------------------------------------------------------
 class RVOLCalculator:
     @staticmethod
@@ -210,18 +210,19 @@ class RVOLCalculator:
         ny_now = datetime.now(MARKET_TIMEZONE)
         logging.info(f"Start pre-calculating RVOL baselines for {len(symbols)} tickers. Time (ET): {ny_now.strftime('%Y-%m-%d %H:%M')}")
         
-        # [修改] 计算日期范围：过去 30 个自然日 (约 20-22 个交易日)
-        # 满足"只需要20个交易日"的需求，同时避免回溯 40 天过长
+        # 计算日期范围：过去 30 个自然日 (约 20-22 个交易日)
         end_date_str = ny_now.strftime("%Y-%m-%d")
         start_date = ny_now - timedelta(days=30) 
         start_date_str = start_date.strftime("%Y-%m-%d")
         
         connector = aiohttp.TCPConnector(limit=5)
         semaphore = asyncio.Semaphore(5)
+        # 添加 Headers 以防拦截
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"}
         
         async def fetch_intraday(session, sym):
-            # 获取 5分钟级别 K线
-            url = f"https://financialmodelingprep.com/stable/historical-chart/5min/{sym}?from={start_date_str}&to={end_date_str}&apikey={FMP_API_KEY}"
+            # [关键修改] 使用用户提供的正确 URL 格式: ?symbol=...
+            url = f"https://financialmodelingprep.com/stable/historical-chart/5min?symbol={sym}&from={start_date_str}&to={end_date_str}&apikey={FMP_API_KEY}"
             async with semaphore:
                 retries = 3
                 for i in range(retries):
@@ -233,11 +234,14 @@ class RVOLCalculator:
                             elif resp.status == 429:
                                 await asyncio.sleep(2)
                                 continue
-                    except: pass
+                            else:
+                                logging.error(f"RVOL Fetch Error {sym}: Status {resp.status}")
+                    except Exception as e:
+                        logging.error(f"RVOL Fetch Exception {sym}: {e}")
                     await asyncio.sleep(0.5)
             return sym, []
 
-        async with aiohttp.ClientSession(connector=connector) as session:
+        async with aiohttp.ClientSession(connector=connector, headers=headers) as session:
             tasks = [fetch_intraday(session, sym) for sym in symbols]
             results = await asyncio.gather(*tasks)
 
@@ -248,17 +252,14 @@ class RVOLCalculator:
                 df = pd.DataFrame(data)
                 if 'date' not in df.columns or 'volume' not in df.columns: continue
                 
-                # [关键] 时间处理：识别冬夏令时
-                # FMP historical-chart 通常返回的是美东时间的墙上时间（Wall Clock Time）字符串
+                # 时间处理：识别冬夏令时
                 df['date'] = pd.to_datetime(df['date'])
                 
-                # 如果是 naive time (没有时区信息)，则假定为美东时间并添加时区信息
                 if df['date'].dt.tz is None:
                     df['date'] = df['date'].dt.tz_localize(MARKET_TIMEZONE, ambiguous='NaT', nonexistent='shift_forward')
                 else:
                     df['date'] = df['date'].dt.tz_convert(MARKET_TIMEZONE)
                 
-                # 过滤无效时间（NaT）
                 df = df.dropna(subset=['date'])
 
                 df['time_str'] = df['date'].dt.strftime('%H:%M')
@@ -272,7 +273,6 @@ class RVOLCalculator:
                 df['cum_vol'] = df.groupby('date_only')['volume'].cumsum()
                 
                 # 计算过去 N 天的中位数作为基准
-                # 这里的数据已经是经过筛选的过去 ~30 天内的交易日数据 (约20个交易日)
                 baseline = df.groupby('time_str')['cum_vol'].median()
                 rvol_baseline_cache[sym] = baseline.to_dict()
                 count_ok += 1
