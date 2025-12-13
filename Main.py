@@ -57,7 +57,7 @@ CONFIG = {
         "max_rsi": 60,                # [防过热] RSI(14) 超过 60 则不看
         "max_bias_50": 0.20,          # [防回落] 现价偏离 50日均线 20% 以上不看
         "max_upper_shadow": 0.4,      # [防抛压] 上影线长度占整根K线 40% 以上不看
-        "max_day_change": 0.7,        # [防妖股] 单日涨跌幅超过 70% 不看
+        "max_day_change": 0.07,        # [防妖股] 单日涨跌幅超过 7% 不看
         
         "min_rvol": 1.2,              # [核心] RVOL 必须 > 1.2 (比历史同期活跃20%以上)
         
@@ -96,7 +96,7 @@ CONFIG = {
         "RESONANCE": {
             "window_days": 5,         # [窗口] 回溯过去 5 天寻找背离信号
             "min_signals": 2,         # [阈值] 至少需要 2 个指标同时背离才算共振
-            "bonus_score": 25         # [加分] 达成共振后的奖励分数
+            "bonus_score": 30         # [加分] 达成共振后的奖励分数
         },
 
         # [4.2] 策略参数
@@ -128,8 +128,8 @@ CONFIG = {
             "HEAVY_INSTITUTIONAL": 20, # [量能] 纯粹的机构异动 (高 RVOL)
             
             "MACD_ZERO_CROSS": 10,  # [指标] MACD 0轴金叉
-            "MACD_DIVERGE": 15,     # [指标] MACD 底背离 (常规)
-            "KDJ_REBOUND": 10,      # [指标] KDJ 超卖反弹
+            "MACD_DIVERGE": 10,     # [指标] MACD 底背离 (常规)
+            "KDJ_REBOUND": 5,      # [指标] KDJ 超卖反弹
             "CANDLE_PATTERN": 5     # [K线] 吞没/晨星/锤子
         },
 
@@ -1163,116 +1163,6 @@ def _generate_chart_sync(df, ticker, res_line=[], sup_line=[], stop_price=None, 
         
     return buf
 
-async def generate_chart(df, ticker, res_line=[], sup_line=[], stop_price=None, support_price=None, anchor_idx=None):
-    return await asyncio.to_thread(_generate_chart_sync, df, ticker, res_line, sup_line, stop_price, support_price, anchor_idx)
-
-async def update_stats_data():
-    if "signal_history" not in settings: return
-    updates_made = False
-    symbols_to_check = set()
-    history = settings["signal_history"]
-    for date_str, tickers_data in history.items():
-        try:
-            signal_date = datetime.strptime(date_str, "%Y-%m-%d").date()
-        except ValueError: continue
-        today = datetime.now().date()
-        if signal_date >= today: continue 
-        for ticker, data in tickers_data.items():
-            need_1d = data.get("ret_1d") is None
-            need_5d = data.get("ret_5d") is None and (today - signal_date).days > 5
-            need_10d = data.get("ret_10d") is None and (today - signal_date).days > 10
-            need_20d = data.get("ret_20d") is None and (today - signal_date).days > 20
-            if need_1d or need_5d or need_10d or need_20d: symbols_to_check.add(ticker)
-            
-    if not symbols_to_check: return
-    data_map = await fetch_historical_batch(list(symbols_to_check), days=60)
-    
-    for date_str, tickers_data in history.items():
-        signal_date = datetime.strptime(date_str, "%Y-%m-%d").date()
-        for ticker, data in tickers_data.items():
-            if ticker not in data_map: continue
-            df = data_map[ticker]
-            try:
-                after_signal = df[df.index.date > signal_date]
-                if after_signal.empty: continue
-                signal_price = data['price']
-                if signal_price <= 0: continue
-                
-                # 1D
-                if data.get("ret_1d") is None and len(after_signal) >= 1:
-                    price_1d = after_signal.iloc[0]['close']
-                    data["ret_1d"] = round(((price_1d - signal_price) / signal_price) * 100, 2)
-                    updates_made = True
-                
-                # 5D
-                if data.get("ret_5d") is None and len(after_signal) >= 5:
-                    price_5d = after_signal.iloc[4]['close'] 
-                    data["ret_5d"] = round(((price_5d - signal_price) / signal_price) * 100, 2)
-                    updates_made = True
-                    
-                # 10D
-                if data.get("ret_10d") is None and len(after_signal) >= 10:
-                    price_10d = after_signal.iloc[9]['close'] 
-                    data["ret_10d"] = round(((price_10d - signal_price) / signal_price) * 100, 2)
-                    updates_made = True
-
-                # 20D
-                if data.get("ret_20d") is None and len(after_signal) >= 20:
-                    price_20d = after_signal.iloc[19]['close'] 
-                    data["ret_20d"] = round(((price_20d - signal_price) / signal_price) * 100, 2)
-                    updates_made = True
-            except: pass
-    if updates_made: save_settings()
-
-def get_level_by_score(score): 
-    if score >= 100: return CONFIG["SCORE"]["EMOJI"].get(100, "TOP")
-    if score >= 90: return CONFIG["SCORE"]["EMOJI"].get(90, "HIGH")
-    if score >= 80: return CONFIG["SCORE"]["EMOJI"].get(80, "MID")
-    if score >= 70: return CONFIG["SCORE"]["EMOJI"].get(70, "LOW")
-    return CONFIG["SCORE"]["EMOJI"].get(60, "TEST") 
-
-def create_alert_embed(ticker, score, price, reason, stop_loss, support, df, filename, rvol=None, is_filtered=False):
-    level_str = get_level_by_score(score)
-    if "过滤器" in reason or "STALE" in reason:
-        color = 0x95a5a6 
-    else:
-        color = 0x00ff00 if score >= 80 else 0x3498db
-    
-    title_text = f"🚨{ticker} 抄底信号 | 得分 {score}"
-    if is_filtered:
-        title_text = f"🚫{ticker} 信号拦截 | 得分 {score} (低分)"
-        color = 0x7f8c8d
-      
-    embed = discord.Embed(title=title_text, color=color)
-    
-    score_display = f"~~{score}~~" if is_filtered else f"{score}"
-    embed.description = f"**现价:** `${price:.2f}`\n**得分:** {score_display}"
-      
-    curr = df.iloc[-1]
-    obv_status = "流入" if curr['OBV'] > curr['OBV_MA20'] else "流出"
-    
-    vol_str = f"`{rvol:.2f}x`" if rvol else "N/A"
-    
-    indicator_text = (
-        f"**RSI(14):** `{curr['RSI']:.1f}`\n"
-        f"**ADX:** `{curr['ADX']:.1f}`\n"
-        f"**RVOL:** {vol_str}\n" 
-        f"**OBV:** `{obv_status}`\n"
-        f"**Bias(50):** `{curr['BIAS_50']*100:.1f}%`"
-    )
-    embed.add_field(name="\u200b", value=indicator_text, inline=True)
-      
-    risk_text = (
-        f"**止损价:** `${stop_loss:.2f}`\n"
-        f"**支撑位:** `${support:.2f}`\n"
-    )
-    embed.add_field(name="\u200b", value=risk_text, inline=True)
-      
-    embed.add_field(name="\u200b", value=f"```{reason}```", inline=False)
-    embed.set_image(url=f"attachment://{filename}")
-      
-    return embed
-
 class StockBotClient(discord.Client):
     def __init__(self, *, intents: discord.Intents):
         super().__init__(intents=intents)
@@ -1437,8 +1327,397 @@ class StockBotClient(discord.Client):
             embed.add_field(name="详细情况", value="\n".join(recent_list_str), inline=False)
         else:
             embed.add_field(name="详细情况", value="无近期信号", inline=False)
+
+        embed.set_footer(text=f"Report generated at {datetime.now(MARKET_TIMEZONE).strftime('%H:%M:%S')} ET")
+        await self.alert_channel.send(embed=embed)
+
+    @tasks.loop(minutes=1)
+    async def scheduled_report(self):
+        now_et = datetime.now(MARKET_TIMEZONE)
+        if now_et.hour == 16 and now_et.minute == 30:
+            today_date = now_et.date()
+            if self.last_report_date != today_date:
+                await self.send_daily_stats_report()
+                self.last_report_date = today_date
+
+    @tasks.loop(minutes=5)
+    async def monitor_stocks(self):
+        if not self.alert_channel: return
+        now_et = datetime.now(MARKET_TIMEZONE)
+        curr_time, today_str = now_et.time(), now_et.strftime('%Y-%m-%d')
+        
+        is_open_scan = TIME_MARKET_SCAN_START <= curr_time <= TIME_MARKET_CLOSE
+        
+        if not is_open_scan: return
+        
+        logging.info(f"[{now_et.strftime('%H:%M')}] Scanning started...")
+        users_data = settings.get("users", {})
+        all_tickers = set()
+        ticker_user_map = defaultdict(list)
+        
+        for uid, udata in users_data.items():
+            for k in list(udata['daily_status'].keys()):
+                if not k.endswith(today_str): del udata['daily_status'][k]
+            for ticker in udata.get("stocks", []):
+                all_tickers.add(ticker)
+                ticker_user_map[ticker].append(uid)
+
+        if not all_tickers: 
+            logging.info("No tickers to scan.")
+            return
+
+        hist_map = await fetch_historical_batch(list(all_tickers))
+        quotes_map = {}
+        if TIME_MARKET_OPEN <= curr_time <= TIME_MARKET_CLOSE:
+            quotes_map = await fetch_realtime_quotes(list(all_tickers))
+
+        alerts_buffer = []
+        if "signal_history" not in settings: settings["signal_history"] = {}
+        if today_str not in settings["signal_history"]: settings["signal_history"][today_str] = {}
+
+        for ticker, df_hist in hist_map.items():
+            df = df_hist
+            if ticker in quotes_map:
+                df = await asyncio.to_thread(merge_and_recalc_sync, df_hist, quotes_map[ticker])
             
-        await interaction.followup.send(embed=embed)
+            if df is None or df.empty: continue
+
+            user_ids = ticker_user_map[ticker]
+            all_alerted = True
+            users_to_ping = []
+            for uid in user_ids:
+                status_key = f"{ticker}-{today_str}"
+                status = users_data[uid]['daily_status'].get(status_key, "NONE")
+                if status == "NONE":
+                    users_to_ping.append(uid)
+                    all_alerted = False
+            
+            if all_alerted: continue
+
+            history = settings.get("signal_history", {})
+            in_cooldown = False
+            cooldown_days = CONFIG["system"]["cooldown_days"]
+            last_signal_score = 0
+            
+            for i in range(1, cooldown_days + 1): 
+                past_date = (now_et.date() - timedelta(days=i)).strftime("%Y-%m-%d")
+                if past_date in history and ticker in history[past_date]:
+                    last_signal_score = history[past_date][ticker].get("score", 0)
+                    in_cooldown = True 
+            
+            is_triggered, score, reason, res_line, sup_line, anchor_idx, rvol = await check_signals(df, ticker)
+            
+            today_signal_data = settings["signal_history"][today_str].get(ticker)
+            if today_signal_data:
+                today_score = today_signal_data.get("score", 0)
+                if score <= today_score:
+                    is_triggered = False
+                    logging.info(f"Ticker {ticker} skipped because a signal with score {today_score} was already sent today.")
+
+            if is_triggered and in_cooldown and last_signal_score > 0:
+                if score <= last_signal_score:
+                    logging.info(f"Ticker {ticker} skipped due to cooldown (Last Score: {last_signal_score}).")
+                    is_triggered = False
+            
+            if is_triggered:
+                price = df['close'].iloc[-1]
+                stop_loss, support = calculate_risk_levels(df)
+                
+                alert_obj = {
+                    "ticker": ticker,
+                    "score": score, 
+                    "priority": score, 
+                    "price": price,
+                    "reason": reason,
+                    "support": support,
+                    "stop_loss": stop_loss,
+                    "df": df,
+                    "res_line": res_line,
+                    "sup_line": sup_line,
+                    "anchor_idx": anchor_idx, 
+                    "users": users_to_ping,
+                    "rvol": rvol 
+                }
+                alerts_buffer.append(alert_obj)
+
+        if alerts_buffer:
+            alerts_buffer.sort(key=lambda x: x["priority"], reverse=True)
+            max_charts = CONFIG["system"]["max_charts_per_scan"]
+            sent_charts = 0
+            summary_list = []
+
+            for alert in alerts_buffer:
+                ticker = alert["ticker"]
+                score = alert["score"]
+                users = alert["users"]
+                
+                current_hist = settings["signal_history"][today_str].get(ticker, {})
+                settings["signal_history"][today_str][ticker] = {
+                    "score": score,
+                    "price": alert["price"],
+                    "time": now_et.strftime('%H:%M'),
+                    "reason": alert["reason"],
+                    "ret_1d": current_hist.get("ret_1d"),
+                    "ret_5d": current_hist.get("ret_5d"),
+                    "ret_10d": current_hist.get("ret_10d"),
+                    "ret_20d": current_hist.get("ret_20d"),
+                }
+                
+                for uid in users:
+                    status_key = f"{ticker}-{today_str}"
+                    users_data[uid]['daily_status'][status_key] = "MARKET_SENT"
+                
+                mentions = " ".join([f"<@{uid}>" for uid in users])
+                
+                if sent_charts < max_charts:
+                    chart_buf = await generate_chart(
+                        alert["df"], ticker, alert["res_line"], alert["sup_line"], 
+                        alert["stop_loss"], alert["support"], alert["anchor_idx"]
+                    )
+                    filename = f"{ticker}.png"
+                    
+                    embed = create_alert_embed(
+                        ticker, score, alert['price'], alert['reason'], 
+                        alert['stop_loss'], alert['support'], alert['df'], filename,
+                        rvol=alert["rvol"]
+                    )
+                    
+                    try:
+                        file = discord.File(chart_buf, filename=filename)
+                        await self.alert_channel.send(content=mentions, embed=embed, file=file)
+                        sent_charts += 1
+                        await asyncio.sleep(1.5)
+                    except Exception as e: logging.error(f"Send Error: {e}")
+                    finally:
+                        chart_buf.close() 
+                else:
+                    summary_list.append(f"**{ticker}** ({score})")
+
+            if summary_list:
+                summary_msg = f"**其他提醒 (摘要)**:\n" + " | ".join(summary_list)
+                try: 
+                    await self.alert_channel.send(content=summary_msg)
+                except: pass
+            
+            save_settings()
+        
+        logging.info(f"[{now_et.strftime('%H:%M')}] Scan finished. Alerts: {len(alerts_buffer)}")
+
+# -----------------------------------------------------------------------------
+# [Critical Fix] Must instantiate client BEFORE decorators
+# -----------------------------------------------------------------------------
+intents = discord.Intents.default()
+client = StockBotClient(intents=intents)
+
+@client.tree.command(name="reset_stats", description="Reset all backtest statistics")
+async def reset_stats(interaction: discord.Interaction):
+    global settings
+    settings["signal_history"] = {}
+    save_settings()
+    await interaction.response.send_message("Statistics reset.", ephemeral=True)
+
+@client.tree.command(name="watch_add", description="Add stocks to watch list (e.g., AAPL, TSLA)")
+@app_commands.describe(codes="Stock Symbols")
+async def watch_add(interaction: discord.Interaction, codes: str):
+    await interaction.response.defer()
+    user_data = get_user_data(interaction.user.id)
+    new_list = list(set([t.strip().upper() for t in codes.replace(',', ' ').replace('，', ' ').split() if t.strip()]))
+    current_set = set(user_data["stocks"])
+    current_set.update(new_list)
+    user_data["stocks"] = list(current_set)
+    save_settings()
+    asyncio.create_task(RVOLCalculator.precalculate_baselines(new_list))
+    await interaction.followup.send(f"Added: `{', '.join(new_list)}`")
+
+@client.tree.command(name="watch_remove", description="Remove stocks from watch list")
+@app_commands.describe(codes="Stock Symbols")
+async def watch_remove(interaction: discord.Interaction, codes: str):
+    await interaction.response.defer()
+    user_data = get_user_data(interaction.user.id)
+    to_remove = set([t.strip().upper() for t in codes.replace(',', ' ').replace('，', ' ').split() if t.strip()])
+    current_list = user_data["stocks"]
+    new_list = [s for s in current_list if s not in to_remove]
+    user_data["stocks"] = new_list
+    for t in to_remove:
+        keys_to_del = [k for k in user_data['daily_status'] if k.startswith(t)]
+        for k in keys_to_del: del user_data['daily_status'][k]
+    save_settings()
+    await interaction.followup.send(f"Removed: `{', '.join(to_remove)}`")
+
+@client.tree.command(name="watch_list", description="Show my watch list")
+async def watch_list(interaction: discord.Interaction):
+    stocks = get_user_data(interaction.user.id)["stocks"]
+    if len(stocks) > 60: display_str = ", ".join(stocks[:60]) + f"... ({len(stocks)})"
+    else: display_str = ", ".join(stocks) if stocks else 'Empty'
+    await interaction.response.send_message(f"List:\n`{display_str}`", ephemeral=True)
+
+@client.tree.command(name="watch_clear", description="Clear all watched stocks")
+async def watch_clear(interaction: discord.Interaction):
+    user_data = get_user_data(interaction.user.id)
+    user_data["stocks"] = []
+    user_data["daily_status"] = {}
+    save_settings()
+    await interaction.response.send_message("Cleared.", ephemeral=True)
+
+@client.tree.command(name="watch_import", description="Import preset lists")
+@app_commands.choices(preset=[
+    app_commands.Choice(name="NASDAQ 100", value="NASDAQ_100"),
+    app_commands.Choice(name="GOD TIER", value="GOD_TIER")
+])
+async def watch_import(interaction: discord.Interaction, preset: app_commands.Choice[str]):
+    await interaction.response.defer()
+    user_data = get_user_data(interaction.user.id)
+    new_list = STOCK_POOLS.get(preset.value, [])
+    current_set = set(user_data["stocks"])
+    current_set.update(new_list)
+    user_data["stocks"] = list(current_set)
+    save_settings()
+    asyncio.create_task(RVOLCalculator.precalculate_baselines(new_list))
+    await interaction.followup.send(f"Imported {preset.name} ({len(new_list)} stocks).")
+
+@client.tree.command(name="stats", description="View historical signal accuracy (20-day window)")
+async def stats_command(interaction: discord.Interaction):
+    await interaction.response.defer()
+    
+    await update_stats_data()
+    
+    load_settings()
+    history = settings.get("signal_history", {})
+    market_df = await fetch_market_index_data(days=80)
+
+    def get_market_ret(date_str, offset_days):
+        if market_df is None or market_df.empty: return None
+        try:
+            target_date = pd.to_datetime(date_str).normalize()
+            idx = market_df.index.get_indexer([target_date], method='nearest')[0]
+            if idx + offset_days < len(market_df):
+                p_start = market_df.iloc[idx]['price']
+                p_end = market_df.iloc[idx + offset_days]['price']
+                return ((p_end - p_start) / p_start) * 100
+        except:
+            pass
+        return None
+
+    stats_agg = {
+        k: {"s_sum": 0.0, "s_c": 0, "m_sum": 0.0, "m_c": 0, "w": 0} 
+        for k in ["1d", "5d", "10d", "20d"]
+    }
+    
+    seen_tickers = set()
+    valid_signals = []
+    
+    sorted_dates = sorted(history.keys(), reverse=True)
+    today = datetime.now().date()
+    
+    for date_str in sorted_dates:
+        try:
+            sig_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+        except: continue
+        
+        days_diff = (today - sig_date).days
+        if days_diff > 25: continue
+        
+        tickers_data = history[date_str]
+        for ticker, data in tickers_data.items():
+            if data.get("score", 0) == 0: continue
+
+            if ticker in seen_tickers: continue
+            seen_tickers.add(ticker)
+            
+            score = data.get("score", 0)
+            valid_signals.append((date_str, ticker, score, data))
+            
+            for k, days_off in [("1d", 1), ("5d", 5), ("10d", 10), ("20d", 20)]:
+                m = get_market_ret(date_str, days_off) 
+                if m is not None:
+                    stats_agg[k]["m_sum"] += m
+                    stats_agg[k]["m_c"] += 1
+
+                r = data.get(f"ret_{k}")
+                if r is not None:
+                    stats_agg[k]["s_sum"] += r
+                    stats_agg[k]["s_c"] += 1
+                    if r > 0: stats_agg[k]["w"] += 1
+
+    embed = discord.Embed(title="回测统计", color=0x00BFFF)
+    
+    def mk_field(key):
+        d = stats_agg[key]
+        
+        if d["s_c"] > 0:
+            avg_stock = d["s_sum"] / d["s_c"]
+            avg_stock_str = f"`{avg_stock:+.2f}%`"
+            win_rate = f"`{d['w']/d['s_c']*100:.0f}%`"
+        else:
+            avg_stock = None
+            avg_stock_str = "Wait..."
+            win_rate = "-"
+
+        if d["m_c"] > 0:
+            avg_market = d["m_sum"] / d["m_c"]
+            avg_market_str = f"`{avg_market:+.2f}%`"
+        else:
+            if d["s_c"] == 0 and market_df is not None and not market_df.empty:
+                try:
+                    days_offset = int(key[:-1])
+                    if len(market_df) > days_offset:
+                        p_now = market_df.iloc[-1]['price']
+                        p_prev = market_df.iloc[-(days_offset+1)]['price']
+                        val = ((p_now - p_prev) / p_prev) * 100
+                        avg_market = val
+                        avg_market_str = f"`{val:+.2f}%`"
+                    else:
+                        avg_market = None
+                        avg_market_str = "Wait..."
+                except:
+                    avg_market = None
+                    avg_market_str = "Wait..."
+            else:
+                avg_market = None
+                avg_market_str = "Wait..."
+        
+        if avg_market is not None and isinstance(avg_market, float):
+            avg_market_str = f"`{avg_market:+.2f}%`"
+        else:
+            avg_market_str = "Wait..."
+
+        if avg_stock is not None and avg_market is not None and isinstance(avg_market, float):
+            diff = avg_stock - avg_market
+            diff_str = f"**{diff:+.2f}%**"
+        else:
+            diff_str = "-"
+        
+        return (
+            f"个股平均: {avg_stock_str}\n"
+            f"纳指同期: {avg_market_str}\n"
+            f"超额收益: {diff_str}\n"
+            f"个股胜率: {win_rate}"
+        )
+
+    embed.add_field(name="1日表现", value=mk_field("1d"), inline=True)
+    embed.add_field(name="5日表现", value=mk_field("5d"), inline=True)
+    embed.add_field(name="10日表现", value=mk_field("10d"), inline=True)
+    embed.add_field(name="20日表现", value=mk_field("20d"), inline=True)
+
+    recent_list_str = []
+    for date_str, ticker, score, data in valid_signals[:10]:
+        r1 = data.get("ret_1d")
+        r1_str = f"{r1:+.1f}%" if r1 is not None else "-"
+        r5 = data.get("ret_5d")
+        r5_str = f"{r5:+.1f}%" if r5 is not None else "-"
+        r10 = data.get("ret_10d")
+        r10_str = f"{r10:+.1f}%" if r10 is not None else "-"
+        r20 = data.get("ret_20d")
+        r20_str = f"{r20:+.1f}%" if r20 is not None else "-"
+        
+        recent_list_str.append(f"`{date_str}` **{ticker}**\n└ 1D:`{r1_str}` 5D:`{r5_str}` 10D:`{r10_str}` 20D:`{r20_str}`")
+        
+    if recent_list_str:
+        embed.add_field(name="详细情况", value="\n".join(recent_list_str), inline=False)
+    else:
+        embed.add_field(name="详细情况", value="无近期信号", inline=False)
+        
+    await interaction.followup.send(embed=embed)
 
 @client.tree.command(name="test", description="Test single stock")
 async def test_command(interaction: discord.Interaction, ticker: str):
