@@ -57,7 +57,7 @@ CONFIG = {
         "max_rsi": 60,                # [防过热] RSI(14) 超过 60 则不看
         "max_bias_50": 0.20,          # [防回落] 现价偏离 50日均线 20% 以上不看
         "max_upper_shadow": 0.4,      # [防抛压] 上影线长度占整根K线 40% 以上不看
-        "max_day_change": 0.7,        # [防妖股] 单日涨跌幅超过 70% 不看
+        "max_day_change": 0.07,        # [防妖股] 单日涨跌幅超过 7% 不看
         
         "min_rvol": 1.2,              # [核心] RVOL 必须 > 1.2 (比历史同期活跃20%以上)
         
@@ -95,7 +95,7 @@ CONFIG = {
         "RESONANCE": {
             "window_days": 5,         # [窗口] 回溯过去 5 天寻找背离信号
             "min_signals": 2,         # [阈值] 至少需要 2 个指标同时背离才算共振
-            "bonus_score": 25         # [加分] 达成共振后的奖励分数
+            "bonus_score": 30         # [加分] 达成共振后的奖励分数
         },
 
         # [4.2] 策略参数
@@ -127,8 +127,8 @@ CONFIG = {
             "HEAVY_INSTITUTIONAL": 20, # [量能] 纯粹的机构异动 (高 RVOL)
             
             "MACD_ZERO_CROSS": 10,  # [指标] MACD 0轴金叉
-            "MACD_DIVERGE": 15,     # [指标] MACD 底背离 (常规)
-            "KDJ_REBOUND": 10,      # [指标] KDJ 超卖反弹
+            "MACD_DIVERGE": 10,     # [指标] MACD 底背离 (常规)
+            "KDJ_REBOUND": 5,      # [指标] KDJ 超卖反弹
             "CANDLE_PATTERN": 5     # [K线] 吞没/晨星/锤子
         },
 
