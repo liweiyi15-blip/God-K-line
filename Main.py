@@ -59,77 +59,88 @@ US_MARKET_HOLIDAYS = {
     "2025-07-04", "2025-09-01", "2025-11-27", "2025-12-25"
 }
 
-# --- 核心策略配置 ---
+# --- 核心策略配置 (RVOL 加强版 + 四维共振 + 动态布林) ---
 CONFIG = {
-    # [1] 过滤器
+    # [1] 过滤器：左侧抄底核心 (一票否决制)
     "filter": {
-        "max_60d_gain": 0.3,          
-        "max_rsi": 60,                
-        "max_bias_50": 0.20,          
-        "max_upper_shadow": 0.4,      
-        "max_day_change": 0.07,       
-        "min_rvol": 1.2,              
-        "bb_squeeze_days": 5,         
-        "bb_squeeze_tolerance": 0.03, 
-        "max_consolidation_amp": 0.05,
-        "bb_expansion_rate": 1.2,     
-        "max_bottom_pos": 0.30,       
-        "min_adx_for_squeeze": 15     
+        "max_60d_gain": 0.3,          # [防追高] 过去60天涨幅超过 30% 则不看
+        "max_rsi": 60,                # [防过热] RSI(14) 超过 60 则不看
+        "max_bias_50": 0.20,          # [防回落] 现价偏离 50日均线 20% 以上不看
+        "max_upper_shadow": 0.4,      # [防抛压] 上影线长度占整根K线 40% 以上不看
+        "max_day_change": 0.7,        # [防妖股] 单日涨跌幅超过 70% 不看
+        
+        "min_rvol": 1.2,              # [核心] RVOL 必须 > 1.2 (比历史同期活跃20%以上)
+        
+        # [布林带动态配置 - 修改部分]
+        "min_bb_squeeze_width": 0.10, # [前置条件] 昨日带宽需小于此值 (定义什么是"窄")
+        "bb_expansion_rate": 1.2,     # [动态扩张] 今天带宽 / 昨天带宽 >= 1.2 (即扩大20%才算开口)
+        
+        "max_bottom_pos": 0.30,       # [位置] 价格在过去60天区间的位置 (0.3表示底部30%)
+        "min_adx_for_squeeze": 15     # [趋势] ADX 最小门槛，确保不是死水
     },
 
     # [2] 形态识别
     "pattern": {
-        "pivot_window": 10,           
-        "support_tolerance": 0.02,    
-        "support_window": 4           
+        "pivot_window": 10            # [关键点] 识别高低点的前后窗口天数
     },
 
     # [3] 系统设置
     "system": {
-        "cooldown_days": 3,           
-        "max_charts_per_scan": 5,     
-        "history_days": 300           
+        "cooldown_days": 3,           # [防刷屏] 发出信号后的冷却天数
+        "max_charts_per_scan": 5,     # [防拥堵] 每次扫描最大发送图表数量
+        "history_days": 300           # [数据源] 获取历史数据的天数
     },
 
     # [4] 打分系统
     "SCORE": { 
-        "MIN_ALERT_SCORE": 70,        
+        "MIN_ALERT_SCORE": 70,        # [及格线] 总分低于此值不报警
+        
+        # [4.1] 四维共振设置
         "RESONANCE": {
-            "window_days": 5,         
-            "min_signals": 2,         
-            "bonus_score": 30         
+            "window_days": 5,         # [窗口] 回溯过去 5 天寻找背离信号
+            "min_signals": 2,         # [阈值] 至少需要 2 个指标同时背离才算共振
+            "bonus_score": 30         # [加分] 达成共振后的奖励分数
         },
+
+        # [4.2] 策略参数
         "PARAMS": {
-            "rvol_heavy": 2.0,              
-            "rvol_capitulation": 2.5,       
-            "adx_strong_threshold": 25,     
-            "adx_activation_lower": 20,     
-            "kdj_j_oversold": 0,            
-            "divergence_price_tolerance": 1.02, 
-            "divergence_macd_strength": 0.8,    
-            "obv_lookback": 5,              
-            "capitulation_pinbar": 0.5      
+            "rvol_heavy": 2.0,              # [机构] RVOL > 2.0 视为机构大单扫货
+            "rvol_capitulation": 2.5,       # [恐慌] 恐慌抛售时的量能要求
+            
+            "adx_strong_threshold": 25,     # [趋势] ADX > 25 视为强趋势
+            "adx_activation_lower": 20,     # [趋势] ADX < 20 视为盘整，用于判断启动
+            "kdj_j_oversold": 0,            # [超卖] KDJ.J < 0 视为超卖
+            "divergence_price_tolerance": 1.02, # [背离] 价格创新低容差
+            "divergence_macd_strength": 0.8,    # [背离] MACD 柱子强度的容差
+            "obv_lookback": 5,              # [资金] OBV 回溯对比天数
+            "capitulation_pinbar": 0.5      # [K线] 针型K线判断阈值
         },
+
+        # [4.3] 权重 (各项得分)
         "WEIGHTS": {
-            "PATTERN_BREAK": 40,    
-            "PATTERN_SUPPORT": 20,  
-            "BB_SQUEEZE": 35,       
-            "STRONG_ADX": 20,       
-            "ADX_ACTIVATION": 25,   
-            "OBV_TREND_UP": 15,     
-            "CAPITULATION": 25,     
-            "HEAVY_INSTITUTIONAL": 20, 
-            "MACD_ZERO_CROSS": 10,  
-            "MACD_DIVERGE": 10,     
-            "KDJ_REBOUND": 5,       
-            "CANDLE_PATTERN": 5     
+            # "4D_RESONANCE": 25,   # 由 CONFIG["RESONANCE"]["bonus_score"] 控制
+            
+            "PATTERN_BREAK": 40,    # [形态] 旗形突破 (最重要)
+            "PATTERN_SUPPORT": 20,  # [形态] 旗形支撑回踩
+            "BB_SQUEEZE": 35,       # [布林] 极度压缩后的开口
+            "STRONG_ADX": 20,       # [趋势] 强趋势状态
+            "ADX_ACTIVATION": 25,   # [趋势] 趋势从盘整中激活
+            "OBV_TREND_UP": 15,     # [资金] OBV 持续向上
+            
+            "CAPITULATION": 25,     # [抄底] 恐慌盘涌出 (配合 RVOL 验证)
+            "HEAVY_INSTITUTIONAL": 20, # [量能] 纯粹的机构异动 (高 RVOL)
+            
+            "MACD_ZERO_CROSS": 10,  # [指标] MACD 0轴金叉
+            "MACD_DIVERGE": 10,     # [指标] MACD 底背离 (常规)
+            "KDJ_REBOUND": 5,      # [指标] KDJ 超卖反弹
+            "CANDLE_PATTERN": 5     # [K线] 吞没/晨星/锤子
         },
+
         "EMOJI": { 
             100: "TOP", 90: "HIGH", 80: "MID", 70: "LOW", 60: "TEST"
         }
     }
 }
-
 # --- 静态股票池 ---
 STOCK_POOLS = {
     "NASDAQ_100": [
