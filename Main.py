@@ -49,20 +49,22 @@ TIME_MARKET_OPEN = time(9, 30)
 TIME_MARKET_SCAN_START = time(10, 0) # 10点才开始报
 TIME_MARKET_CLOSE = time(16, 0)
 
-# --- 核心策略配置 (RVOL 加强版 + 四维共振) ---
+# --- 核心策略配置 (RVOL 加强版 + 四维共振 + 动态布林) ---
 CONFIG = {
     # [1] 过滤器：左侧抄底核心 (一票否决制)
     "filter": {
         "max_60d_gain": 0.3,          # [防追高] 过去60天涨幅超过 30% 则不看
-        "max_rsi": 55,                # [防过热] RSI(14) 超过 55 则不看
+        "max_rsi": 60,                # [防过热] RSI(14) 超过 60 则不看
         "max_bias_50": 0.20,          # [防回落] 现价偏离 50日均线 20% 以上不看
         "max_upper_shadow": 0.4,      # [防抛压] 上影线长度占整根K线 40% 以上不看
-        "max_day_change": 0.07,        # [防妖股] 单日涨跌幅超过 7% 不看
+        "max_day_change": 0.7,        # [防妖股] 单日涨跌幅超过 70% 不看
         
         "min_rvol": 1.2,              # [核心] RVOL 必须 > 1.2 (比历史同期活跃20%以上)
         
-        "min_bb_squeeze_width": 0.08, # [布林带] 盘整带宽门槛 (越小越窄)
-        "min_bb_expand_width": 0.095, # [布林带] 开口带宽门槛 (需大于此值才算开口)
+        # [布林带动态配置 - 修改部分]
+        "min_bb_squeeze_width": 0.10, # [前置条件] 昨日带宽需小于此值 (定义什么是"窄")
+        "bb_expansion_rate": 1.2,     # [动态扩张] 今天带宽 / 昨天带宽 >= 1.2 (即扩大20%才算开口)
+        
         "max_bottom_pos": 0.30,       # [位置] 价格在过去60天区间的位置 (0.3表示底部30%)
         "min_adx_for_squeeze": 15     # [趋势] ADX 最小门槛，确保不是死水
     },
@@ -83,11 +85,11 @@ CONFIG = {
     "SCORE": { 
         "MIN_ALERT_SCORE": 70,        # [及格线] 总分低于此值不报警
         
-        # [4.1] 四维共振设置 (新)
+        # [4.1] 四维共振设置
         "RESONANCE": {
-            "window_days": 5,         # [窗口] 回溯过去多少天寻找背离信号
-            "min_signals": 2,         # [阈值] 至少需要几个指标同时背离才算共振
-            "bonus_score": 30         # [加分] 达成共振后的奖励分数
+            "window_days": 5,         # [窗口] 回溯过去 5 天寻找背离信号
+            "min_signals": 2,         # [阈值] 至少需要 2 个指标同时背离才算共振
+            "bonus_score": 25         # [加分] 达成共振后的奖励分数
         },
 
         # [4.2] 策略参数
@@ -106,7 +108,7 @@ CONFIG = {
 
         # [4.3] 权重 (各项得分)
         "WEIGHTS": {
-            # 这里的 4D_RESONANCE 由上方 CONFIG 动态控制，此处仅占位，逻辑中直接使用 bonus_score
+            # "4D_RESONANCE": 25,   # 由 CONFIG["RESONANCE"]["bonus_score"] 控制
             
             "PATTERN_BREAK": 40,    # [形态] 旗形突破 (最重要)
             "PATTERN_SUPPORT": 20,  # [形态] 旗形支撑回踩
@@ -119,8 +121,8 @@ CONFIG = {
             "HEAVY_INSTITUTIONAL": 20, # [量能] 纯粹的机构异动 (高 RVOL)
             
             "MACD_ZERO_CROSS": 10,  # [指标] MACD 0轴金叉
-            "MACD_DIVERGE": 10,     # [指标] MACD 底背离 (常规)
-            "KDJ_REBOUND": 5,      # [指标] KDJ 超卖反弹
+            "MACD_DIVERGE": 15,     # [指标] MACD 底背离 (常规)
+            "KDJ_REBOUND": 10,      # [指标] KDJ 超卖反弹
             "CANDLE_PATTERN": 5     # [K线] 吞没/晨星/锤子
         },
 
@@ -776,16 +778,21 @@ def check_signals_sync(df, ticker): # [修改] 传入 ticker
 
     # --- 纯粹抄底信号逻辑 ---
     
-    # [A] 布林带挤压 + 低位
-    bb_min_width = CONFIG["filter"]["min_bb_squeeze_width"]
-    bb_target_width = CONFIG["filter"]["min_bb_expand_width"]
+    # [A] 布林带挤压 + 低位 (修改为动态比例)
+    bb_squeeze_limit = CONFIG["filter"]["min_bb_squeeze_width"]
+    bb_expand_rate = CONFIG["filter"]["bb_expansion_rate"]
     max_pos = CONFIG["filter"]["max_bottom_pos"]
     price_pos = (curr['close'] - low_60) / (high_60 - low_60) if high_60 > low_60 else 0.5
-    if prev['BB_Width'] < bb_min_width: 
-        if curr['BB_Width'] >= bb_target_width: 
+    
+    if prev['BB_Width'] < bb_squeeze_limit: 
+        # 计算扩张比例
+        prev_width_safe = prev['BB_Width'] if prev['BB_Width'] > 0 else 0.001
+        width_ratio = curr['BB_Width'] / prev_width_safe
+        
+        if width_ratio >= bb_expand_rate: 
             if curr['close'] > curr['open']: 
                  if price_pos <= max_pos: 
-                    triggers.append(f"BB Squeeze: 低位启动 (宽:{curr['BB_Width']:.3f}, 位:{price_pos:.2f})")
+                    triggers.append(f"BB Squeeze: 变盘启动 (前宽:{prev['BB_Width']:.3f}, 扩张:{width_ratio:.2f}x)")
                     score += weights["BB_SQUEEZE"]
 
     # [B] ADX 趋势启动
@@ -1206,8 +1213,7 @@ def create_alert_embed(ticker, score, price, reason, stop_loss, support, df, fil
     else:
         color = 0x00ff00 if score >= 80 else 0x3498db
     
-    # 如果是因为分数低被过滤，在标题打上删除线效果 (Embed Title不支持删除线，改在描述中体现)
-    # 或者我们在标题写上 "Filtered"
+    # 标题如果包含不支持的格式字符可能显示异常，故状态在描述中体现
     title_text = f"🚨{ticker} 抄底信号 | 得分 {score}"
     if is_filtered:
         title_text = f"🚫{ticker} 信号拦截 | 得分 {score} (低分)"
