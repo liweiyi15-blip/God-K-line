@@ -49,7 +49,7 @@ TIME_MARKET_OPEN = time(9, 30)
 TIME_MARKET_SCAN_START = time(10, 0) # 10点才开始报
 TIME_MARKET_CLOSE = time(16, 0)
 
-# --- 核心策略配置 (RVOL 加强版) ---
+# --- 核心策略配置 (RVOL 加强版 + 四维共振) ---
 CONFIG = {
     # [1] 过滤器：左侧抄底核心
     "filter": {
@@ -98,6 +98,8 @@ CONFIG = {
 
         # 每个信号对应的分值
         "WEIGHTS": {
+            "4D_RESONANCE": 25,     # [新增] 四维共振 (MACD/RSI/CCI/MFI 背离)
+            
             "PATTERN_BREAK": 40,    # 旗形突破
             "PATTERN_SUPPORT": 20,  # 旗形支撑
             "BB_SQUEEZE": 35,       # 布林带挤压
@@ -290,6 +292,12 @@ def calculate_indicators(df):
     loss = (-delta.clip(upper=0)).rolling(window=14).mean()
     rs = gain / loss.replace(0, 1e-9)
     df['RSI'] = 100 - (100 / (1 + rs))
+    # [新增] 辅助 RSI 用于共振计算
+    gain6 = (delta.clip(lower=0)).rolling(window=6).mean()
+    loss6 = (-delta.clip(upper=0)).rolling(window=6).mean()
+    rs6 = gain6 / loss6.replace(0, 1e-9)
+    df['RSI6'] = 100 - (100 / (1 + rs6))
+    df['RSI12'] = df['RSI'].copy() # Use RSI(14) as base approx or separate, standard is 6, 12 for crossover
       
     df['Vol_MA20'] = df['volume'].rolling(window=20).mean()
       
@@ -348,9 +356,30 @@ def calculate_indicators(df):
     df['OBV_MA20'] = df['OBV'].rolling(window=20).mean()
 
     # [新增] 丝带指标 (视觉用, 不参与评分)
-    # 使用 EMA 21 (快) 和 EMA 60 (慢) 构成经典趋势带
     df['Ribbon_Fast'] = df['close'].ewm(span=21, adjust=False).mean()
     df['Ribbon_Slow'] = df['close'].ewm(span=60, adjust=False).mean()
+
+    # [新增] CCI (14) 计算
+    # TYP = (H+L+C)/3, CCI = (TYP - MA_TYP) / (0.015 * AVEDEV)
+    df['TP'] = (df['high'] + df['low'] + df['close']) / 3
+    df['TP_MA'] = df['TP'].rolling(window=14).mean()
+    # Pandas MAD is mean absolute deviation
+    df['TP_MAD'] = df['TP'].rolling(window=14).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True)
+    df['CCI'] = (df['TP'] - df['TP_MA']) / (0.015 * df['TP_MAD'].replace(0, 1e-9))
+    df['CCI_MA'] = df['CCI'].rolling(window=5).mean()
+
+    # [新增] MFI (14) 计算
+    # Money Flow = TP * Vol
+    # PMF = Sum of MF where TP > Prev TP, NMF = Sum where TP < Prev TP
+    # MFI = 100 * PMF / (PMF + NMF)
+    df['RawMF'] = df['TP'] * df['volume']
+    df['PosMF'] = np.where(df['TP'] > df['TP'].shift(1), df['RawMF'], 0)
+    df['NegMF'] = np.where(df['TP'] < df['TP'].shift(1), df['RawMF'], 0)
+    df['PosMF_Sum'] = df['PosMF'].rolling(window=14).sum()
+    df['NegMF_Sum'] = df['NegMF'].rolling(window=14).sum()
+    mf_total = df['PosMF_Sum'] + df['NegMF_Sum']
+    df['MFI'] = 100 * (df['PosMF_Sum'] / mf_total.replace(0, 1e-9))
+    df['MFI_MA'] = df['MFI'].rolling(window=6).mean()
 
     return df
 
@@ -852,6 +881,82 @@ def check_signals_sync(df, ticker): # [修改] 传入 ticker
         if rvol > params["rvol_capitulation"]:
             triggers.append(f"抛售高潮: 恐慌盘涌出 (RVOL {rvol:.1f})")
             score += weights["CAPITULATION"]
+
+    # [新增] 四维共振逻辑 (4D Resonance)
+    # 检测过去 5 天内是否发生了指标的底背离信号
+    # 需要满足：CROSS(指标, 信号线) 且 当前PriceLow < 上一次Cross时的PriceLow 且 当前Indicator > 上一次Cross时的Indicator
+    
+    def check_divergence_window(series_val, series_sig, series_low, lookback=5):
+        # 简单高效的实现：检查过去lookback天内是否有Cross且满足背离
+        triggered_days = 0
+        df_len = len(series_val)
+        
+        # 扫描最近5天
+        for i in range(df_len - lookback, df_len):
+            if i <= 20: continue # 数据不够不看
+            
+            # 1. 检查金叉 (前一天 Val < Sig, 今天 Val > Sig)
+            if series_val[i-1] < series_sig[i-1] and series_val[i] > series_sig[i]:
+                # 2. 寻找上一次金叉
+                last_cross_idx = -1
+                # 往回找最多 60 天
+                for j in range(i - 1, max(0, i - 60), -1):
+                    if series_val[j-1] < series_sig[j-1] and series_val[j] > series_sig[j]:
+                        last_cross_idx = j
+                        break
+                
+                if last_cross_idx != -1:
+                    # 3. 比较背离
+                    # 价格创新低 (当前金叉时的 Low < 上次金叉时的 Low)
+                    price_lower = series_low[i] < series_low[last_cross_idx]
+                    # 指标创新高 (当前金叉时的 Val > 上次金叉时的 Val)
+                    ind_higher = series_val[i] > series_val[last_cross_idx]
+                    
+                    if price_lower and ind_higher:
+                        return True
+        return False
+
+    # 准备数据 Series
+    s_low = df['low'].values
+    
+    # 1. MACD 背离
+    div_macd = check_divergence_window(df['DIF'].values, df['DEA'].values, s_low)
+    
+    # 2. RSI 背离 (使用 RSI6 和 RSI12 交叉，或 RSI 和 50)
+    # 此处遵循原版逻辑: CROSS(RSI1, RSI2)
+    div_rsi = check_divergence_window(df['RSI6'].values, df['RSI12'].values, s_low)
+    
+    # 3. MFI 背离
+    div_mfi = check_divergence_window(df['MFI'].values, df['MFI_MA'].values, s_low)
+    
+    # 4. CCI 背离 (特殊: 要求发生背离时 CCI 处于低位/刚脱离低位)
+    # 我们修改 check_divergence_window 为通用，CCI 单独处理或传入 filtered series
+    # 这里手动简写 CCI 逻辑以包含 < -100 判定
+    div_cci = False
+    cci_val = df['CCI'].values
+    cci_ma = df['CCI_MA'].values
+    for i in range(len(df) - 5, len(df)):
+        if i <= 20: continue
+        if cci_val[i-1] < cci_ma[i-1] and cci_val[i] > cci_ma[i]:
+            # 额外条件: 发生金叉时，或者金叉前一天，CCI 曾在深坑 (< -100)
+            is_oversold = (cci_val[i] < -100) or (cci_val[i-1] < -100)
+            if is_oversold:
+                 # 找上次金叉
+                last_cross_idx = -1
+                for j in range(i - 1, max(0, i - 60), -1):
+                    if cci_val[j-1] < cci_ma[j-1] and cci_val[j] > cci_ma[j]:
+                        last_cross_idx = j
+                        break
+                if last_cross_idx != -1:
+                    if s_low[i] < s_low[last_cross_idx] and cci_val[i] > cci_val[last_cross_idx]:
+                        div_cci = True
+                        break
+
+    # 计算共振
+    resonance_count = sum([div_macd, div_rsi, div_mfi, div_cci])
+    if resonance_count >= 2:
+        triggers.append(f"四维共振: {resonance_count}指标底背离 (MACD/RSI/MFI/CCI)")
+        score += weights["4D_RESONANCE"]
 
     is_triggered = (score >= CONFIG["SCORE"]["MIN_ALERT_SCORE"]) and (len(violations) == 0)
     final_reason_parts = triggers + violations
