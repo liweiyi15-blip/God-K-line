@@ -269,7 +269,8 @@ class RVOLCalculator:
                 df = df[(df['time_str'] >= '09:30') & (df['time_str'] <= '16:00')]
                 df = df.sort_values('date')
                 
-                # 计算当日累计成交量
+                # [关键] 计算当日累计成交量
+                # .cumsum() 将每5分钟的独立成交量累加，变成累计量，符合 RVOL 逻辑
                 df['cum_vol'] = df.groupby('date_only')['volume'].cumsum()
                 
                 # 计算过去 N 天的中位数作为基准
@@ -283,9 +284,19 @@ class RVOLCalculator:
     @staticmethod
     def get_current_rvol(ticker, current_cum_vol, ny_time):
         if ticker not in rvol_baseline_cache: return 1.0 
-        minute = ny_time.minute
+        
+        # [NEW] 针对盘后/周末的修正：
+        # 如果当前时间超过 16:00，强制将其映射到 15:55 (数据源中通常的最后一个K线时间)
+        # 这样能确保拿“全天累计成交量”去对比“历史全天累计成交量中位数”
+        if ny_time.time() >= time(16, 0):
+            check_time = ny_time.replace(hour=15, minute=55)
+        else:
+            check_time = ny_time
+            
+        minute = check_time.minute
         floored_minute = (minute // 5) * 5
-        time_key = f"{ny_time.hour:02d}:{floored_minute:02d}"
+        time_key = f"{check_time.hour:02d}:{floored_minute:02d}"
+        
         baseline_vol = rvol_baseline_cache[ticker].get(time_key)
         if not baseline_vol or baseline_vol == 0: return 1.0
         return current_cum_vol / baseline_vol
