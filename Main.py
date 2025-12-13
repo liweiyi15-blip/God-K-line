@@ -49,65 +49,65 @@ TIME_MARKET_OPEN = time(9, 30)
 TIME_MARKET_SCAN_START = time(10, 0) # 10点才开始报
 TIME_MARKET_CLOSE = time(16, 0)
 
-# --- 核心策略配置 (纯粹的 Buy The Dip 版本) ---
+# --- 核心策略配置 (Buy The Dip 版本) ---
 CONFIG = {
-    # [1] 过滤器：左侧抄底核心，严格过滤追高和垃圾股
+    # [1] 过滤器：左侧抄底核心
     "filter": {
         "max_60d_gain": 0.3,          # [防追高] 过去60天涨幅超过 30% 则不看
-        "max_rsi": 60,                # [防过热] RSI(14) 超过 60 则不看 (只做底部)
+        "max_rsi": 60,                # [防过热] RSI(14) 超过 60 则不看
         "max_bias_50": 0.20,          # [防回落] 现价偏离 50日均线 20% 以上不看
         "max_upper_shadow": 0.4,      # [防抛压] 上影线长度占整根K线 40% 以上不看
         "max_day_change": 0.7,        # [防妖股] 单日涨跌幅超过 70% 不看
-        "min_vol_ratio": 1.15,        # [资金门槛] 当前成交量必须 > 20日均量的 1.15倍
-        "min_bb_squeeze_width": 0.08, # [布林带] 之前盘整时的带宽最小值
-        "min_bb_expand_width": 0.095, # [布林带] 现在开口的带宽最小值
-        "max_bottom_pos": 0.30,       # [位置] 价格必须处于过去60天波动区间的底部 30% 区域
-        "min_adx_for_squeeze": 15     # [趋势] ADX 至少要 15 (哪怕是弱趋势)
+        "min_vol_ratio": 1.15,        # [资金门槛] 量比阈值
+        "min_bb_squeeze_width": 0.08, # [布林带] 盘整带宽
+        "min_bb_expand_width": 0.095, # [布林带] 开口带宽
+        "max_bottom_pos": 0.30,       # [位置] 价格处于低位
+        "min_adx_for_squeeze": 15     # [趋势] ADX 门槛
     },
 
     # [2] 形态识别
     "pattern": {
-        "pivot_window": 10            # [关键点] 识别高低点时，左右各看 10 根 K 线
+        "pivot_window": 10            # [关键点] 识别高低点窗口
     },
 
     # [3] 系统设置
     "system": {
-        "cooldown_days": 3,           # [防刷屏] 同一只股票报警后，3天内不再报警
-        "max_charts_per_scan": 5,     # [防拥堵] 每次扫描最多发送 5 张图表
-        "history_days": 300           # [数据源] 获取过去 300 天的历史数据
+        "cooldown_days": 3,           # [防刷屏] 冷却时间
+        "max_charts_per_scan": 5,     # [防拥堵] 每次最大发图数
+        "history_days": 300           # [数据源] 获取天数
     },
 
-    # [4] 打分系统：满足条件加分，分数越高信号越强
+    # [4] 打分系统
     "SCORE": { 
-        "MIN_ALERT_SCORE": 70,        # [及格线] 总分 >= 70 才报警
+        "MIN_ALERT_SCORE": 70,        # [及格线]
         
-        # 具体的参数阈值
         "PARAMS": {
-            "heavy_vol_multiplier": 1.55,   # [巨量] 量比 > 1.55 倍算巨量
-            "adx_strong_threshold": 25,     # [强趋势] ADX > 25 算强趋势
-            "adx_activation_lower": 20,     # [趋势激活] ADX 从 20 以下拐头向上
-            "kdj_j_oversold": 0,            # [超卖] KDJ 的 J 值小于 0
-            "divergence_price_tolerance": 1.02, # [背离] 价格创新低容差
-            "divergence_macd_strength": 0.8,    # [背离] MACD 强度系数
-            "obv_lookback": 5,              # [资金] OBV 回溯 5 天看趋势
-            "capitulation_vol_mult": 2,     # [抛售高潮] 量比 > 2 倍算恐慌抛售
-            "capitulation_pinbar": 0.5,     # [金针探底] 下影线占比 > 0.5
-            "capitulation_mcap": 5_000_000_000 # (未使用)
+            "heavy_vol_multiplier": 1.55,   # [巨量]
+            "adx_strong_threshold": 25,     # [强趋势]
+            "adx_activation_lower": 20,     # [趋势激活]
+            "kdj_j_oversold": 0,            # [超卖]
+            "divergence_price_tolerance": 1.02, # [背离] 价格容差
+            "divergence_macd_strength": 0.8,    # [背离] MACD 系数
+            "obv_lookback": 5,              # [资金] OBV 回溯
+            "capitulation_vol_mult": 2,     # [抛售] 量比
+            "capitulation_pinbar": 0.5,     # [金针]
+            "capitulation_mcap": 5_000_000_000 
         },
 
-        # 每个信号对应的分值 (移除了 Nx 相关权重)
+        # 每个信号对应的分值
         "WEIGHTS": {
-            "PATTERN_BREAK": 40,    # 形态突破 (最重要)
-            "BB_SQUEEZE": 35,       # 布林带挤压突破 (提升权重)
-            "STRONG_ADX": 20,       # 强趋势确认
-            "ADX_ACTIVATION": 25,   # 趋势刚刚启动 (提升权重)
+            "PATTERN_BREAK": 40,    # 旗形突破 (优先级最高)
+            "PATTERN_SUPPORT": 20,  # 旗形支撑回踩 (新增，与突破互斥)
+            "BB_SQUEEZE": 35,       # 布林带挤压
+            "STRONG_ADX": 20,       # 强趋势
+            "ADX_ACTIVATION": 25,   # 趋势启动
             "OBV_TREND_UP": 15,     # 资金流入
-            "CAPITULATION": 20,     # 抛售高潮 (恐慌盘 - 抄底核心)
+            "CAPITULATION": 20,     # 抛售高潮
             "HEAVY_VOLUME": 10,     # 放量
             "MACD_ZERO_CROSS": 10,  # MACD 金叉
-            "MACD_DIVERGE": 15,     # MACD 底背离 (提升权重)
+            "MACD_DIVERGE": 15,     # MACD 底背离
             "KDJ_REBOUND": 10,      # KDJ 反弹
-            "CANDLE_PATTERN": 5     # K线形态 (吞没/晨星等)
+            "CANDLE_PATTERN": 5     # K线形态
         },
 
         "EMOJI": { 
@@ -170,7 +170,6 @@ def get_user_data(user_id):
     return settings["users"][uid_str]
 
 # --- 核心逻辑 (指标计算) ---
-# [修改] 移除了 Nx 相关计算
 def calculate_indicators(df):
     cols = ['open', 'high', 'low', 'close', 'volume']
     for c in cols:
@@ -431,7 +430,7 @@ def find_pivots(df, window=10):
     return pivots_high, pivots_low
 
 def identify_patterns(df):
-    if len(df) < 60: return None, [], [], None
+    if len(df) < 60: return None, [], [], None, None, None # Modified to return slope/intercept
     pivots_high, pivots_low = find_pivots(df, window=5)
     res_line, sup_line = [], []
     pattern_name = None
@@ -440,6 +439,10 @@ def identify_patterns(df):
     curr_idx = len(df) - 1
     t_start = df.index[vis_start_idx]
     t_end = df.index[curr_idx]
+    
+    # [新增] 支撑线参数
+    sup_slope = None
+    sup_intercept = None
       
     # --- 1. 阻力线 (Resistance) ---
     if pivots_high:
@@ -506,12 +509,16 @@ def identify_patterns(df):
                         best_sup_line = (m_sup, c_sup)
         if best_sup_line:
             m_sup, c_sup = best_sup_line
+            # [新增] 保存斜率和截距，供后续逻辑判断使用
+            sup_slope = m_sup
+            sup_intercept = c_sup
+            
             lp_start = m_sup * vis_start_idx + c_sup
             lp_end = m_sup * curr_idx + c_sup
             sup_line = [[(t_start, lp_start), (t_end, lp_end)]]
             if min_anchor_idx is None: min_anchor_idx = sorted_pivots[0][2] 
 
-    return pattern_name, res_line, sup_line, min_anchor_idx
+    return pattern_name, res_line, sup_line, min_anchor_idx, sup_slope, sup_intercept
 
 def detect_candle_patterns(df):
     if len(df) < 5: return []
@@ -571,7 +578,7 @@ def calculate_risk_levels(df):
     return stop_loss, support
 
 # -----------------------------------------------------------------------------
-# [核心修改] 纯粹 Buy The Dip 逻辑
+# [核心修改] 纯粹 Buy The Dip 逻辑 (新增旗形支撑判定)
 # -----------------------------------------------------------------------------
 def check_signals_sync(df):
     if len(df) < 60: return False, 0, "数据不足", [], [], None
@@ -657,10 +664,64 @@ def check_signals_sync(df):
         triggers.append(f"趋势激活: 盘整结束 ADX拐头")
         score += weights["ADX_ACTIVATION"]
 
-    pattern_name, res_line, sup_line, anchor_idx = identify_patterns(df)
+    # [新增] 旗形突破与支撑逻辑
+    pattern_name, res_line, sup_line, anchor_idx, sup_slope, sup_intercept = identify_patterns(df)
+    
+    pattern_scored = False # 互斥锁
+    
+    # 1. 优先判断突破 (40分)
     if pattern_name:
         triggers.append(pattern_name)
         score += weights["PATTERN_BREAK"]
+        pattern_scored = True
+    
+    # 2. 如果没有突破，判断是否在支撑线附近 (20分)
+    # 只有当 identify_patterns 返回了有效的支撑线斜率和截距时才计算
+    if not pattern_scored and sup_slope is not None:
+        curr_idx = len(df) - 1
+        
+        # 内部函数：计算某一天支撑线价格
+        def get_sup_price(idx): return sup_slope * idx + sup_intercept
+        
+        curr_sup = get_sup_price(curr_idx)
+        # 当前价格必须在 [支撑线, 支撑线+2%] 之间 (宽容度2%)
+        # 允许微小刺破 (例如 0.995)，但主要是站稳
+        is_on_support_now = (curr['close'] >= curr_sup * 0.995) and (curr['close'] <= curr_sup * 1.02)
+        
+        if is_on_support_now:
+            # 条件A: 触碰到旗型支撑附近(宽容度支撑线上2%以内）四个交易日后还在这个区间内
+            # 逻辑：检查过去 4 天内，是否有 Low 触碰过支撑区间
+            was_touching = False
+            start_check_idx = max(0, curr_idx - 4)
+            for i in range(start_check_idx, curr_idx):
+                sup_at_i = get_sup_price(i)
+                low_at_i = df['low'].iloc[i]
+                # 只要最低价踩到过支撑线附近 (1.02以内)
+                if low_at_i <= sup_at_i * 1.02:
+                    was_touching = True
+                    break
+            
+            if was_touching:
+                triggers.append("旗形支撑: 触底企稳 (4日确认)")
+                score += weights["PATTERN_SUPPORT"]
+                pattern_scored = True
+            
+            # 条件B: 跌破支撑线后回踩线上之后三个交易日后还在支撑线上2%内
+            # 逻辑：如果没有触发条件A，检查是否有过跌破后收回
+            if not pattern_scored:
+                was_broken = False
+                # 检查过去 6 天内是否有收盘价跌破支撑线
+                start_check_idx = max(0, curr_idx - 6)
+                for i in range(start_check_idx, curr_idx - 2): # 至少预留2-3天回踩时间
+                    sup_at_i = get_sup_price(i)
+                    if df['close'].iloc[i] < sup_at_i:
+                        was_broken = True
+                        break
+                
+                if was_broken:
+                    triggers.append("旗形支撑: 假摔回踩 (3日确认)")
+                    score += weights["PATTERN_SUPPORT"]
+                    pattern_scored = True
 
     # [C] MACD & KDJ 反转
     is_zero_cross = prev['DIF'] < 0 and curr['DIF'] > 0 and curr['DIF'] > curr['DEA']
@@ -812,8 +873,6 @@ def _generate_chart_sync(df, ticker, res_line=[], sup_line=[], stop_price=None, 
         }
     )
 
-    # [修改] 移除了 Nx 填充层
-    
     add_plots = [
         mpf.make_addplot(plot_df['BB_Up'], color='#9370DB', linestyle=':', width=0.6, alpha=0.5),
         mpf.make_addplot(plot_df['BB_Mid'], color='#9370DB', linestyle=':', width=0.6, alpha=0.7), 
@@ -835,7 +894,6 @@ def _generate_chart_sync(df, ticker, res_line=[], sup_line=[], stop_price=None, 
         tight_layout=True, datetime_format='%m-%d', xrotation=0, figsize=(10, 6),
         returnfig=True, 
         scale_padding={'right': 1.0}
-        # fill_between 移除
     )
       
     if seq_of_points:
@@ -1222,7 +1280,7 @@ class StockBotClient(discord.Client):
                     last_signal_score = history[past_date][ticker].get("score", 0)
                     in_cooldown = True 
             
-            # [修改] 解包 min_anchor_idx
+            # [修改] 解包 anchor_idx
             is_triggered, score, reason, res_line, sup_line, anchor_idx = await check_signals(df)
             
             today_signal_data = settings["signal_history"][today_str].get(ticker)
