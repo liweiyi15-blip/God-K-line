@@ -766,7 +766,7 @@ def check_signals_sync(df, ticker): # [修改] 传入 ticker
     
     recent_adx_min = df['ADX'].iloc[-10:-1].min()
     adx_activating = (recent_adx_min < params["adx_activation_lower"]) and \
-                     (df['ADX'].iloc[-1] > df['ADX'].iloc[-2] > df['ADX'].iloc[-3])
+                      (df['ADX'].iloc[-1] > df['ADX'].iloc[-2] > df['ADX'].iloc[-3])
     if adx_activating:
         triggers.append(f"趋势激活: 盘整结束 ADX拐头")
         score += weights["ADX_ACTIVATION"]
@@ -899,7 +899,7 @@ def _generate_chart_sync(df, ticker, res_line=[], sup_line=[], stop_price=None, 
     else:
         vol_bull, vol_bear, bin_centers, bar_height = [], [], [], 0
 
-    total_len = len(plot_df)                
+    total_len = len(plot_df)                 
     if stop_price is None: stop_price = df['close'].iloc[-1] * 0.95
     if support_price is None: support_price = df['close'].iloc[-1] * 0.90
     stop_line_data = [stop_price] * total_len
@@ -968,13 +968,15 @@ def _generate_chart_sync(df, ticker, res_line=[], sup_line=[], stop_price=None, 
         }
     )
 
-    # [新增] 丝带填充逻辑
+    # [修改] 丝带填充逻辑
     ribbon_fast = plot_df['Ribbon_Fast'].values
     ribbon_slow = plot_df['Ribbon_Slow'].values
     
-    # 填充颜色定义：Fast > Slow (绿带)，Fast < Slow (红带)
-    fb_green = dict(y1=ribbon_fast, y2=ribbon_slow, where=ribbon_fast >= ribbon_slow, color='#00ff00', alpha=0.15)
-    fb_red = dict(y1=ribbon_fast, y2=ribbon_slow, where=ribbon_fast < ribbon_slow, color='#ff0000', alpha=0.15)
+    # 填充颜色定义：Fast > Slow (蓝色)，Fast < Slow (黄色)
+    # alpha 设为 0.1
+    # 选用 #00BFFF (DeepSkyBlue) 保证在深色背景下可见
+    fb_bull = dict(y1=ribbon_fast, y2=ribbon_slow, where=ribbon_fast >= ribbon_slow, color='#00BFFF', alpha=0.1)
+    fb_bear = dict(y1=ribbon_fast, y2=ribbon_slow, where=ribbon_fast < ribbon_slow, color='#FFFF00', alpha=0.1)
 
     add_plots = [
         mpf.make_addplot(plot_df['BB_Up'], color='#9370DB', linestyle=':', width=0.6, alpha=0.5),
@@ -982,9 +984,9 @@ def _generate_chart_sync(df, ticker, res_line=[], sup_line=[], stop_price=None, 
         mpf.make_addplot(plot_df['BB_Low'], color='#9370DB', linestyle=':', width=0.6, alpha=0.5),
         mpf.make_addplot(stop_line_data, color='red', linestyle='--', width=0.8, alpha=0.6), 
         mpf.make_addplot(supp_line_data, color='green', linestyle=':', width=0.8, alpha=0.6),
-        # [新增] 丝带 addplot (线宽设为0隐藏线条，只显示填充)
-        mpf.make_addplot(plot_df['Ribbon_Fast'], width=0, alpha=0, fill_between=fb_green),
-        mpf.make_addplot(plot_df['Ribbon_Fast'], width=0, alpha=0, fill_between=fb_red),
+        # [修改] 丝带 addplot (线宽设为0隐藏线条，只显示填充)
+        mpf.make_addplot(plot_df['Ribbon_Fast'], width=0, alpha=0, fill_between=fb_bull),
+        mpf.make_addplot(plot_df['Ribbon_Fast'], width=0, alpha=0, fill_between=fb_bear),
     ]
       
     seq_of_points = []
