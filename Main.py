@@ -686,6 +686,21 @@ def check_signals_sync(df, ticker): # [修改] 传入 ticker
     if curr['BIAS_50'] > CONFIG["filter"]["max_bias_50"]: violations.append("过滤器: 乖离率过大")
     if curr['Upper_Shadow_Ratio'] > CONFIG["filter"]["max_upper_shadow"]: violations.append("过滤器: 长上影线压力")
 
+    # ============================================================
+    # [修改逻辑开始] 提前计算形态，用于量能豁免判断
+    # ============================================================
+    pattern_name, res_line, sup_line, anchor_idx, sup_slope, sup_intercept = identify_patterns(df)
+    
+    # 判断是否处于“支撑线”附近 (为了给“底部休眠”发免死金牌)
+    is_structure_support = False
+    if sup_slope is not None:
+        curr_idx = len(df) - 1
+        curr_sup_price = sup_slope * curr_idx + sup_intercept
+        # 如果当前价格在支撑线附近 (0.98 ~ 1.03)
+        if 0.98 <= curr['close'] / curr_sup_price <= 1.03:
+            is_structure_support = True
+    # ============================================================
+
     # --- [关键] RVOL 计算与判定 ---
     ny_now = datetime.now(MARKET_TIMEZONE)
     market_open = ny_now.replace(hour=9, minute=30, second=0, microsecond=0)
@@ -706,7 +721,14 @@ def check_signals_sync(df, ticker): # [修改] 传入 ticker
         # 盘前盘后或刚开盘，不看 RVOL
         is_volume_ok = True 
         
-    if not is_volume_ok: violations.append(f"过滤器: 资金不活跃 (RVOL {rvol:.2f} < 1.2)")
+    if not is_volume_ok: 
+        # [修改] 结构性豁免逻辑
+        if is_structure_support:
+            # 如果处于支撑位，允许缩量（底部休眠），不视为违规
+            pass 
+        else:
+            # 既没放量，又没踩支撑，视为垃圾时间
+            violations.append(f"过滤器: 资金不活跃 (RVOL {rvol:.2f} < 1.2)")
     
     # [评分] 机构大单扫货信号 (纯量能加分)
     if rvol > params["rvol_heavy"]:
@@ -745,7 +767,7 @@ def check_signals_sync(df, ticker): # [修改] 传入 ticker
         score += weights["ADX_ACTIVATION"]
 
     # [新增] 旗形突破与支撑逻辑
-    pattern_name, res_line, sup_line, anchor_idx, sup_slope, sup_intercept = identify_patterns(df)
+    # 注意：pattern_name, res_line 等已经在上面调用过了，直接使用
     pattern_scored = False 
     
     # 1. 优先判断突破 (40分)
@@ -872,7 +894,7 @@ def _generate_chart_sync(df, ticker, res_line=[], sup_line=[], stop_price=None, 
     else:
         vol_bull, vol_bear, bin_centers, bar_height = [], [], [], 0
 
-    total_len = len(plot_df)              
+    total_len = len(plot_df)               
     if stop_price is None: stop_price = df['close'].iloc[-1] * 0.95
     if support_price is None: support_price = df['close'].iloc[-1] * 0.90
     stop_line_data = [stop_price] * total_len
