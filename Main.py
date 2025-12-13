@@ -57,12 +57,11 @@ CONFIG = {
         "max_rsi": 60,                # [防过热] RSI(14) 超过 60 则不看
         "max_bias_50": 0.20,          # [防回落] 现价偏离 50日均线 20% 以上不看
         "max_upper_shadow": 0.4,      # [防抛压] 上影线长度占整根K线 40% 以上不看
-        "max_day_change": 0.07,        # [防妖股] 单日涨跌幅超过 7% 不看
+        "max_day_change": 0.7,        # [防妖股] 单日涨跌幅超过 70% 不看
         
         "min_rvol": 1.2,              # [核心] RVOL 必须 > 1.2 (比历史同期活跃20%以上)
         
         # [布林带动态配置 - 全动态版]
-        # 逻辑：过去N天带宽稳定 + 股价振幅小(横盘) -> 今天带宽突然放大
         "bb_squeeze_days": 5,         # [挤压窗口] 回溯考察过去多少天
         "bb_squeeze_tolerance": 0.03, # [带宽稳定] 考察期内，带宽最大值与最小值的差需小于此值
         "max_consolidation_amp": 0.05,# [股价横盘] 考察期内，股价(High-Low)/Low 的振幅需小于 5%
@@ -96,7 +95,7 @@ CONFIG = {
         "RESONANCE": {
             "window_days": 5,         # [窗口] 回溯过去 5 天寻找背离信号
             "min_signals": 2,         # [阈值] 至少需要 2 个指标同时背离才算共振
-            "bonus_score": 30         # [加分] 达成共振后的奖励分数
+            "bonus_score": 25         # [加分] 达成共振后的奖励分数
         },
 
         # [4.2] 策略参数
@@ -128,8 +127,8 @@ CONFIG = {
             "HEAVY_INSTITUTIONAL": 20, # [量能] 纯粹的机构异动 (高 RVOL)
             
             "MACD_ZERO_CROSS": 10,  # [指标] MACD 0轴金叉
-            "MACD_DIVERGE": 10,     # [指标] MACD 底背离 (常规)
-            "KDJ_REBOUND": 5,      # [指标] KDJ 超卖反弹
+            "MACD_DIVERGE": 15,     # [指标] MACD 底背离 (常规)
+            "KDJ_REBOUND": 10,      # [指标] KDJ 超卖反弹
             "CANDLE_PATTERN": 5     # [K线] 吞没/晨星/锤子
         },
 
@@ -1162,6 +1161,12 @@ def _generate_chart_sync(df, ticker, res_line=[], sup_line=[], stop_price=None, 
         plt.close('all')
         
     return buf
+
+# -----------------------------------------------------------------------------
+# [Async Wrapper for Chart Generation]
+# -----------------------------------------------------------------------------
+async def generate_chart(df, ticker, res_line=[], sup_line=[], stop_price=None, support_price=None, anchor_idx=None):
+    return await asyncio.to_thread(_generate_chart_sync, df, ticker, res_line, sup_line, stop_price, support_price, anchor_idx)
 
 class StockBotClient(discord.Client):
     def __init__(self, *, intents: discord.Intents):
