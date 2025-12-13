@@ -57,7 +57,7 @@ CONFIG = {
         "max_rsi": 60,                # [防过热] RSI(14) 超过 60 则不看
         "max_bias_50": 0.20,          # [防回落] 现价偏离 50日均线 20% 以上不看
         "max_upper_shadow": 0.4,      # [防抛压] 上影线长度占整根K线 40% 以上不看
-        "max_day_change": 0.07,        # [防妖股] 单日涨跌幅超过 7% 不看
+        "max_day_change": 0.07,       # [防妖股] 单日涨跌幅超过 7% 不看
         
         "min_rvol": 1.2,              # [核心] RVOL 必须 > 1.2 (比历史同期活跃20%以上)
         
@@ -128,7 +128,7 @@ CONFIG = {
             
             "MACD_ZERO_CROSS": 10,  # [指标] MACD 0轴金叉
             "MACD_DIVERGE": 10,     # [指标] MACD 底背离 (常规)
-            "KDJ_REBOUND": 5,      # [指标] KDJ 超卖反弹
+            "KDJ_REBOUND": 5,       # [指标] KDJ 超卖反弹
             "CANDLE_PATTERN": 5     # [K线] 吞没/晨星/锤子
         },
 
@@ -1023,7 +1023,7 @@ def _generate_chart_sync(df, ticker, res_line=[], sup_line=[], stop_price=None, 
     else:
         vol_bull, vol_bear, bin_centers, bar_height = [], [], [], 0
 
-    total_len = len(plot_df)                 
+    total_len = len(plot_df)                  
     if stop_price is None: stop_price = df['close'].iloc[-1] * 0.95
     if support_price is None: support_price = df['close'].iloc[-1] * 0.90
     stop_line_data = [stop_price] * total_len
@@ -1167,6 +1167,57 @@ def _generate_chart_sync(df, ticker, res_line=[], sup_line=[], stop_price=None, 
 # -----------------------------------------------------------------------------
 async def generate_chart(df, ticker, res_line=[], sup_line=[], stop_price=None, support_price=None, anchor_idx=None):
     return await asyncio.to_thread(_generate_chart_sync, df, ticker, res_line, sup_line, stop_price, support_price, anchor_idx)
+
+# -----------------------------------------------------------------------------
+# [FIXED] 补充缺失的 Embed 生成函数
+# -----------------------------------------------------------------------------
+def create_alert_embed(ticker, score, price, reason, stop_loss, support, df, filename, rvol=None, is_filtered=False):
+    """
+    生成报警 Embed 对象
+    """
+    # 颜色与标题前缀逻辑
+    if is_filtered:
+        color = 0x95a5a6 # 灰色
+        title = f"⚪ 观察: {ticker}"
+    elif score >= 90:
+        color = 0xffd700 # 金色
+        title = f"🔥 极佳: {ticker}"
+    elif score >= 80:
+        color = 0x2ecc71 # 绿色
+        title = f"🚀 强力: {ticker}"
+    else:
+        color = 0x3498db # 蓝色
+        title = f"📢 关注: {ticker}"
+
+    embed = discord.Embed(
+        title=title,
+        description=f"**当前价:** `{price:.2f}`\n**得分:** `{score}`\n\n**触发理由:**\n{reason}",
+        color=color,
+        timestamp=datetime.now(MARKET_TIMEZONE)
+    )
+
+    embed.add_field(name="🛑 止损价", value=f"`{stop_loss:.2f}`", inline=True)
+    embed.add_field(name="🛡️ 支撑位", value=f"`{support:.2f}`", inline=True)
+    
+    # 提取最后一行数据的指标
+    if not df.empty:
+        curr = df.iloc[-1]
+        rvol_str = f"{rvol:.2f}" if rvol is not None else "N/A"
+        rsi_val = curr['RSI'] if 'RSI' in df.columns else 0
+        adx_val = curr['ADX'] if 'ADX' in df.columns else 0
+        embed.add_field(name="📊 指标", value=f"RVOL: `{rvol_str}`\nRSI: `{rsi_val:.1f}`\nADX: `{adx_val:.1f}`", inline=True)
+
+    embed.set_image(url=f"attachment://{filename}")
+    embed.set_footer(text=f"StockBot Analysis | {ticker}")
+    return embed
+
+async def update_stats_data():
+    """
+    占位符函数：更新历史信号的回测数据。
+    防止 stats 命令调用未定义函数导致崩溃。
+    """
+    # 这里可以添加更新逻辑，目前留空以确保代码运行
+    pass
 
 class StockBotClient(discord.Client):
     def __init__(self, *, intents: discord.Intents):
