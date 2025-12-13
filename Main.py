@@ -51,7 +51,7 @@ TIME_MARKET_CLOSE = time(16, 0)
 
 # --- 核心策略配置 (RVOL 加强版 + 四维共振) ---
 CONFIG = {
-    # [1] 过滤器：左侧抄底核心
+    # [1] 过滤器：左侧抄底核心 (一票否决制)
     "filter": {
         "max_60d_gain": 0.3,          # [防追高] 过去60天涨幅超过 30% 则不看
         "max_rsi": 60,                # [防过热] RSI(14) 超过 60 则不看
@@ -59,61 +59,69 @@ CONFIG = {
         "max_upper_shadow": 0.4,      # [防抛压] 上影线长度占整根K线 40% 以上不看
         "max_day_change": 0.7,        # [防妖股] 单日涨跌幅超过 70% 不看
         
-        "min_rvol": 1.2,              # [核心修改] RVOL 必须 > 1.2 (比历史同期活跃20%以上)
+        "min_rvol": 1.2,              # [核心] RVOL 必须 > 1.2 (比历史同期活跃20%以上)
         
-        "min_bb_squeeze_width": 0.08, # [布林带] 盘整带宽
-        "min_bb_expand_width": 0.095, # [布林带] 开口带宽
-        "max_bottom_pos": 0.30,       # [位置] 价格处于低位
-        "min_adx_for_squeeze": 15     # [趋势] ADX 门槛
+        "min_bb_squeeze_width": 0.08, # [布林带] 盘整带宽门槛 (越小越窄)
+        "min_bb_expand_width": 0.095, # [布林带] 开口带宽门槛 (需大于此值才算开口)
+        "max_bottom_pos": 0.30,       # [位置] 价格在过去60天区间的位置 (0.3表示底部30%)
+        "min_adx_for_squeeze": 15     # [趋势] ADX 最小门槛，确保不是死水
     },
 
     # [2] 形态识别
     "pattern": {
-        "pivot_window": 10            # [关键点] 识别高低点窗口
+        "pivot_window": 10            # [关键点] 识别高低点的前后窗口天数
     },
 
     # [3] 系统设置
     "system": {
-        "cooldown_days": 3,           # [防刷屏] 冷却时间
-        "max_charts_per_scan": 5,     # [防拥堵] 每次最大发图数
-        "history_days": 300           # [数据源] 获取天数
+        "cooldown_days": 3,           # [防刷屏] 发出信号后的冷却天数
+        "max_charts_per_scan": 5,     # [防拥堵] 每次扫描最大发送图表数量
+        "history_days": 300           # [数据源] 获取历史数据的天数
     },
 
     # [4] 打分系统
     "SCORE": { 
-        "MIN_ALERT_SCORE": 70,        # [及格线]
+        "MIN_ALERT_SCORE": 70,        # [及格线] 总分低于此值不报警
         
-        "PARAMS": {
-            "rvol_heavy": 2.0,              # [新增] RVOL > 2.0 视为机构大单扫货
-            "rvol_capitulation": 2.5,       # [新增] 恐慌抛售时的量能要求
-            
-            "adx_strong_threshold": 25,     # [强趋势]
-            "adx_activation_lower": 20,     # [趋势激活]
-            "kdj_j_oversold": 0,            # [超卖]
-            "divergence_price_tolerance": 1.02, 
-            "divergence_macd_strength": 0.8,    
-            "obv_lookback": 5,              
-            "capitulation_pinbar": 0.5      
+        # [4.1] 四维共振设置 (新)
+        "RESONANCE": {
+            "window_days": 5,         # [窗口] 回溯过去多少天寻找背离信号
+            "min_signals": 2,         # [阈值] 至少需要几个指标同时背离才算共振
+            "bonus_score": 25         # [加分] 达成共振后的奖励分数
         },
 
-        # 每个信号对应的分值
+        # [4.2] 策略参数
+        "PARAMS": {
+            "rvol_heavy": 2.0,              # [机构] RVOL > 2.0 视为机构大单扫货
+            "rvol_capitulation": 2.5,       # [恐慌] 恐慌抛售时的量能要求
+            
+            "adx_strong_threshold": 25,     # [趋势] ADX > 25 视为强趋势
+            "adx_activation_lower": 20,     # [趋势] ADX < 20 视为盘整，用于判断启动
+            "kdj_j_oversold": 0,            # [超卖] KDJ.J < 0 视为超卖
+            "divergence_price_tolerance": 1.02, # [背离] 价格创新低容差
+            "divergence_macd_strength": 0.8,    # [背离] MACD 柱子强度的容差
+            "obv_lookback": 5,              # [资金] OBV 回溯对比天数
+            "capitulation_pinbar": 0.5      # [K线] 针型K线判断阈值
+        },
+
+        # [4.3] 权重 (各项得分)
         "WEIGHTS": {
-            "4D_RESONANCE": 25,     # [新增] 四维共振 (MACD/RSI/CCI/MFI 背离)
+            # 这里的 4D_RESONANCE 由上方 CONFIG 动态控制，此处仅占位，逻辑中直接使用 bonus_score
             
-            "PATTERN_BREAK": 40,    # 旗形突破
-            "PATTERN_SUPPORT": 20,  # 旗形支撑
-            "BB_SQUEEZE": 35,       # 布林带挤压
-            "STRONG_ADX": 20,       # 强趋势
-            "ADX_ACTIVATION": 25,   # 趋势启动
-            "OBV_TREND_UP": 15,     # 资金流入
+            "PATTERN_BREAK": 40,    # [形态] 旗形突破 (最重要)
+            "PATTERN_SUPPORT": 20,  # [形态] 旗形支撑回踩
+            "BB_SQUEEZE": 35,       # [布林] 极度压缩后的开口
+            "STRONG_ADX": 20,       # [趋势] 强趋势状态
+            "ADX_ACTIVATION": 25,   # [趋势] 趋势从盘整中激活
+            "OBV_TREND_UP": 15,     # [资金] OBV 持续向上
             
-            "CAPITULATION": 25,     # [加强] 抛售高潮 (配合 RVOL 验证)
-            "HEAVY_INSTITUTIONAL": 20, # [新增] 纯粹的机构异动 (高 RVOL)
+            "CAPITULATION": 25,     # [抄底] 恐慌盘涌出 (配合 RVOL 验证)
+            "HEAVY_INSTITUTIONAL": 20, # [量能] 纯粹的机构异动 (高 RVOL)
             
-            "MACD_ZERO_CROSS": 10,  # MACD 金叉
-            "MACD_DIVERGE": 15,     # MACD 底背离
-            "KDJ_REBOUND": 10,      # KDJ 反弹
-            "CANDLE_PATTERN": 5     # K线形态
+            "MACD_ZERO_CROSS": 10,  # [指标] MACD 0轴金叉
+            "MACD_DIVERGE": 15,     # [指标] MACD 底背离 (常规)
+            "KDJ_REBOUND": 10,      # [指标] KDJ 超卖反弹
+            "CANDLE_PATTERN": 5     # [K线] 吞没/晨星/锤子
         },
 
         "EMOJI": { 
@@ -178,7 +186,7 @@ def get_user_data(user_id):
     return settings["users"][uid_str]
 
 # -----------------------------------------------------------------------------
-# [核心新增] RVOL 计算器 (空间换时间)
+# [核心] RVOL 计算器
 # -----------------------------------------------------------------------------
 class RVOLCalculator:
     """
@@ -189,7 +197,6 @@ class RVOLCalculator:
         global rvol_baseline_cache
         logging.info(f"Start pre-calculating RVOL baselines for {len(symbols)} tickers...")
         
-        # 过去 20 天数据
         start_date = (datetime.now() - timedelta(days=25)).strftime("%Y-%m-%d")
         end_date = datetime.now().strftime("%Y-%m-%d")
         
@@ -226,20 +233,15 @@ class RVOLCalculator:
                 df = pd.DataFrame(data)
                 if 'date' not in df.columns or 'volume' not in df.columns: continue
                 
-                # 转换时间
                 df['date'] = pd.to_datetime(df['date']).dt.tz_localize('UTC').dt.tz_convert(MARKET_TIMEZONE)
                 df['time_str'] = df['date'].dt.strftime('%H:%M')
                 df['date_only'] = df['date'].dt.date
                 
-                # 过滤交易时间
                 df = df[(df['time_str'] >= '09:30') & (df['time_str'] <= '16:00')]
                 
-                # [关键] 计算每一天的“累计成交量” (Cumulative Volume)
-                # 只有对比累计值，才能和 Quote 接口返回的 Daily Volume 进行比较
                 df = df.sort_values('date')
                 df['cum_vol'] = df.groupby('date_only')['volume'].cumsum()
                 
-                # 计算基准线：每个时间点的中位数累计成交量
                 baseline = df.groupby('time_str')['cum_vol'].median()
                 
                 rvol_baseline_cache[sym] = baseline.to_dict()
@@ -251,14 +253,9 @@ class RVOLCalculator:
 
     @staticmethod
     def get_current_rvol(ticker, current_cum_vol, ny_time):
-        """
-        计算当前的 RVOL
-        current_cum_vol: 今天截止目前的总成交量 (从 quote['volume'] 获取)
-        """
         if ticker not in rvol_baseline_cache:
-            return 1.0 # 无基准数据，默认 1.0
+            return 1.0 
             
-        # 找到最近的 5分钟 bucket (向下取整)
         minute = ny_time.minute
         floored_minute = (minute // 5) * 5
         time_key = f"{ny_time.hour:02d}:{floored_minute:02d}"
@@ -278,7 +275,7 @@ def calculate_indicators(df):
       
     df = df[df['close'] > 0]
       
-    # MACD
+    # MACD (一次性计算，后续逻辑直接复用)
     price_col = 'close'
     exp12 = df[price_col].ewm(span=12, adjust=False).mean()
     exp26 = df[price_col].ewm(span=26, adjust=False).mean()
@@ -286,18 +283,23 @@ def calculate_indicators(df):
     df['DEA'] = df['DIF'].ewm(span=9, adjust=False).mean()
     df['MACD'] = (df['DIF'] - df['DEA']) * 2
       
-    # RSI
+    # RSI (14)
     delta = df[price_col].diff()
     gain = (delta.clip(lower=0)).rolling(window=14).mean()
     loss = (-delta.clip(upper=0)).rolling(window=14).mean()
     rs = gain / loss.replace(0, 1e-9)
     df['RSI'] = 100 - (100 / (1 + rs))
-    # [新增] 辅助 RSI 用于共振计算
+    
+    # [新增] 辅助 RSI 用于共振计算 (RSI6 和 RSI12)
     gain6 = (delta.clip(lower=0)).rolling(window=6).mean()
     loss6 = (-delta.clip(upper=0)).rolling(window=6).mean()
     rs6 = gain6 / loss6.replace(0, 1e-9)
     df['RSI6'] = 100 - (100 / (1 + rs6))
-    df['RSI12'] = df['RSI'].copy() # Use RSI(14) as base approx or separate, standard is 6, 12 for crossover
+    
+    gain12 = (delta.clip(lower=0)).rolling(window=12).mean()
+    loss12 = (-delta.clip(upper=0)).rolling(window=12).mean()
+    rs12 = gain12 / loss12.replace(0, 1e-9)
+    df['RSI12'] = 100 - (100 / (1 + rs12))
       
     df['Vol_MA20'] = df['volume'].rolling(window=20).mean()
       
@@ -370,8 +372,6 @@ def calculate_indicators(df):
 
     # [新增] MFI (14) 计算
     # Money Flow = TP * Vol
-    # PMF = Sum of MF where TP > Prev TP, NMF = Sum where TP < Prev TP
-    # MFI = 100 * PMF / (PMF + NMF)
     df['RawMF'] = df['TP'] * df['volume']
     df['PosMF'] = np.where(df['TP'] > df['TP'].shift(1), df['RawMF'], 0)
     df['NegMF'] = np.where(df['TP'] < df['TP'].shift(1), df['RawMF'], 0)
@@ -801,7 +801,6 @@ def check_signals_sync(df, ticker): # [修改] 传入 ticker
         score += weights["ADX_ACTIVATION"]
 
     # [新增] 旗形突破与支撑逻辑
-    # 注意：pattern_name, res_line 等已经在上面调用过了，直接使用
     pattern_scored = False 
     
     # 1. 优先判断突破 (40分)
@@ -876,30 +875,27 @@ def check_signals_sync(df, ticker): # [修改] 传入 ticker
              score += weights["OBV_TREND_UP"]
 
     # [F] 抛售高潮 (结合 RVOL 验证)
-    # 逻辑：价格跌破布林下轨 + 极度恐慌的抛盘量(RVOL > 2.5) = 绝佳的恐慌底
     if curr['low'] < curr['BB_Low']: 
         if rvol > params["rvol_capitulation"]:
             triggers.append(f"抛售高潮: 恐慌盘涌出 (RVOL {rvol:.1f})")
             score += weights["CAPITULATION"]
 
     # [新增] 四维共振逻辑 (4D Resonance)
-    # 检测过去 5 天内是否发生了指标的底背离信号
+    # 检测过去 N 天内是否发生了指标的底背离信号
     # 需要满足：CROSS(指标, 信号线) 且 当前PriceLow < 上一次Cross时的PriceLow 且 当前Indicator > 上一次Cross时的Indicator
     
-    def check_divergence_window(series_val, series_sig, series_low, lookback=5):
-        # 简单高效的实现：检查过去lookback天内是否有Cross且满足背离
-        triggered_days = 0
+    res_cfg = CONFIG["SCORE"]["RESONANCE"]
+    res_window = res_cfg["window_days"]
+    
+    def check_divergence_window(series_val, series_sig, series_low, lookback):
         df_len = len(series_val)
-        
-        # 扫描最近5天
         for i in range(df_len - lookback, df_len):
-            if i <= 20: continue # 数据不够不看
+            if i <= 20: continue 
             
-            # 1. 检查金叉 (前一天 Val < Sig, 今天 Val > Sig)
+            # 1. 检查金叉
             if series_val[i-1] < series_sig[i-1] and series_val[i] > series_sig[i]:
                 # 2. 寻找上一次金叉
                 last_cross_idx = -1
-                # 往回找最多 60 天
                 for j in range(i - 1, max(0, i - 60), -1):
                     if series_val[j-1] < series_sig[j-1] and series_val[j] > series_sig[j]:
                         last_cross_idx = j
@@ -907,41 +903,33 @@ def check_signals_sync(df, ticker): # [修改] 传入 ticker
                 
                 if last_cross_idx != -1:
                     # 3. 比较背离
-                    # 价格创新低 (当前金叉时的 Low < 上次金叉时的 Low)
                     price_lower = series_low[i] < series_low[last_cross_idx]
-                    # 指标创新高 (当前金叉时的 Val > 上次金叉时的 Val)
                     ind_higher = series_val[i] > series_val[last_cross_idx]
                     
                     if price_lower and ind_higher:
                         return True
         return False
 
-    # 准备数据 Series
     s_low = df['low'].values
     
     # 1. MACD 背离
-    div_macd = check_divergence_window(df['DIF'].values, df['DEA'].values, s_low)
+    div_macd = check_divergence_window(df['DIF'].values, df['DEA'].values, s_low, res_window)
     
-    # 2. RSI 背离 (使用 RSI6 和 RSI12 交叉，或 RSI 和 50)
-    # 此处遵循原版逻辑: CROSS(RSI1, RSI2)
-    div_rsi = check_divergence_window(df['RSI6'].values, df['RSI12'].values, s_low)
+    # 2. RSI 背离 (使用 RSI6 和 RSI12 交叉)
+    div_rsi = check_divergence_window(df['RSI6'].values, df['RSI12'].values, s_low, res_window)
     
     # 3. MFI 背离
-    div_mfi = check_divergence_window(df['MFI'].values, df['MFI_MA'].values, s_low)
+    div_mfi = check_divergence_window(df['MFI'].values, df['MFI_MA'].values, s_low, res_window)
     
-    # 4. CCI 背离 (特殊: 要求发生背离时 CCI 处于低位/刚脱离低位)
-    # 我们修改 check_divergence_window 为通用，CCI 单独处理或传入 filtered series
-    # 这里手动简写 CCI 逻辑以包含 < -100 判定
+    # 4. CCI 背离 (特殊: 要求发生背离时 CCI 处于低位)
     div_cci = False
     cci_val = df['CCI'].values
     cci_ma = df['CCI_MA'].values
-    for i in range(len(df) - 5, len(df)):
+    for i in range(len(df) - res_window, len(df)):
         if i <= 20: continue
         if cci_val[i-1] < cci_ma[i-1] and cci_val[i] > cci_ma[i]:
-            # 额外条件: 发生金叉时，或者金叉前一天，CCI 曾在深坑 (< -100)
             is_oversold = (cci_val[i] < -100) or (cci_val[i-1] < -100)
             if is_oversold:
-                 # 找上次金叉
                 last_cross_idx = -1
                 for j in range(i - 1, max(0, i - 60), -1):
                     if cci_val[j-1] < cci_ma[j-1] and cci_val[j] > cci_ma[j]:
@@ -954,9 +942,9 @@ def check_signals_sync(df, ticker): # [修改] 传入 ticker
 
     # 计算共振
     resonance_count = sum([div_macd, div_rsi, div_mfi, div_cci])
-    if resonance_count >= 2:
-        triggers.append(f"四维共振: {resonance_count}指标底背离 (MACD/RSI/MFI/CCI)")
-        score += weights["4D_RESONANCE"]
+    if resonance_count >= res_cfg["min_signals"]:
+        triggers.append(f"四维共振: {resonance_count}指标底背离")
+        score += res_cfg["bonus_score"]
 
     is_triggered = (score >= CONFIG["SCORE"]["MIN_ALERT_SCORE"]) and (len(violations) == 0)
     final_reason_parts = triggers + violations
@@ -1073,13 +1061,11 @@ def _generate_chart_sync(df, ticker, res_line=[], sup_line=[], stop_price=None, 
         }
     )
 
-    # [修改] 丝带填充逻辑
+    # [丝带] 填充逻辑
     ribbon_fast = plot_df['Ribbon_Fast'].values
     ribbon_slow = plot_df['Ribbon_Slow'].values
     
-    # 填充颜色定义：Fast > Slow (蓝色)，Fast < Slow (黄色)
-    # alpha 设为 0.1
-    # 选用 #00BFFF (DeepSkyBlue) 保证在深色背景下可见
+    # 蓝色 (Bullish), 黄色 (Bearish), alpha=0.1
     fb_bull = dict(y1=ribbon_fast, y2=ribbon_slow, where=ribbon_fast >= ribbon_slow, color='#00BFFF', alpha=0.1)
     fb_bear = dict(y1=ribbon_fast, y2=ribbon_slow, where=ribbon_fast < ribbon_slow, color='#FFFF00', alpha=0.1)
 
@@ -1089,7 +1075,7 @@ def _generate_chart_sync(df, ticker, res_line=[], sup_line=[], stop_price=None, 
         mpf.make_addplot(plot_df['BB_Low'], color='#9370DB', linestyle=':', width=0.6, alpha=0.5),
         mpf.make_addplot(stop_line_data, color='red', linestyle='--', width=0.8, alpha=0.6), 
         mpf.make_addplot(supp_line_data, color='green', linestyle=':', width=0.8, alpha=0.6),
-        # [修改] 丝带 addplot (线宽设为0隐藏线条，只显示填充)
+        # 丝带 addplot (线宽=0)
         mpf.make_addplot(plot_df['Ribbon_Fast'], width=0, alpha=0, fill_between=fb_bull),
         mpf.make_addplot(plot_df['Ribbon_Fast'], width=0, alpha=0, fill_between=fb_bear),
     ]
@@ -1213,20 +1199,29 @@ def get_level_by_score(score):
     if score >= 70: return CONFIG["SCORE"]["EMOJI"].get(70, "LOW")
     return CONFIG["SCORE"]["EMOJI"].get(60, "TEST") 
 
-def create_alert_embed(ticker, score, price, reason, stop_loss, support, df, filename, rvol=None):
+def create_alert_embed(ticker, score, price, reason, stop_loss, support, df, filename, rvol=None, is_filtered=False):
     level_str = get_level_by_score(score)
     if "过滤器" in reason or "STALE" in reason:
         color = 0x95a5a6 
     else:
         color = 0x00ff00 if score >= 80 else 0x3498db
+    
+    # 如果是因为分数低被过滤，在标题打上删除线效果 (Embed Title不支持删除线，改在描述中体现)
+    # 或者我们在标题写上 "Filtered"
+    title_text = f"🚨{ticker} 抄底信号 | 得分 {score}"
+    if is_filtered:
+        title_text = f"🚫{ticker} 信号拦截 | 得分 {score} (低分)"
+        color = 0x7f8c8d
       
-    embed = discord.Embed(title=f"🚨{ticker} 抄底信号 | 得分 {score}", color=color)
-    embed.description = f"**现价:** `${price:.2f}`"
+    embed = discord.Embed(title=title_text, color=color)
+    
+    # 描述部分支持 markdown 删除线
+    score_display = f"~~{score}~~" if is_filtered else f"{score}"
+    embed.description = f"**现价:** `${price:.2f}`\n**得分:** {score_display}"
       
     curr = df.iloc[-1]
     obv_status = "流入" if curr['OBV'] > curr['OBV_MA20'] else "流出"
     
-    # 显示 RVOL
     vol_str = f"`{rvol:.2f}x`" if rvol else "N/A"
     
     indicator_text = (
@@ -1266,7 +1261,6 @@ class StockBotClient(discord.Client):
         else:
             logging.warning("No ALERT_CHANNEL_ID provided in env.")
         
-        # [启动] 后台初始化 RVOL 基准线
         asyncio.create_task(self.initialize_baselines())
 
         if not self.monitor_stocks.is_running():
@@ -1278,7 +1272,6 @@ class StockBotClient(discord.Client):
         await self.tree.sync()
 
     async def initialize_baselines(self):
-        """初始化 RVOL 基准线"""
         users_data = settings.get("users", {})
         all_tickers = set()
         for u in users_data.values():
@@ -1493,7 +1486,6 @@ class StockBotClient(discord.Client):
                     last_signal_score = history[past_date][ticker].get("score", 0)
                     in_cooldown = True 
             
-            # [修改] 传递 ticker 接收 rvol
             is_triggered, score, reason, res_line, sup_line, anchor_idx, rvol = await check_signals(df, ticker)
             
             today_signal_data = settings["signal_history"][today_str].get(ticker)
@@ -1510,7 +1502,6 @@ class StockBotClient(discord.Client):
             
             if is_triggered:
                 price = df['close'].iloc[-1]
-                
                 stop_loss, support = calculate_risk_levels(df)
                 
                 alert_obj = {
@@ -1526,7 +1517,7 @@ class StockBotClient(discord.Client):
                     "sup_line": sup_line,
                     "anchor_idx": anchor_idx, 
                     "users": users_to_ping,
-                    "rvol": rvol # [新增] 保存 RVOL
+                    "rvol": rvol 
                 }
                 alerts_buffer.append(alert_obj)
 
@@ -1560,14 +1551,12 @@ class StockBotClient(discord.Client):
                 mentions = " ".join([f"<@{uid}>" for uid in users])
                 
                 if sent_charts < max_charts:
-                    # [修改] 传递 anchor_idx
                     chart_buf = await generate_chart(
                         alert["df"], ticker, alert["res_line"], alert["sup_line"], 
                         alert["stop_loss"], alert["support"], alert["anchor_idx"]
                     )
                     filename = f"{ticker}.png"
                     
-                    # [修改] 传入 rvol
                     embed = create_alert_embed(
                         ticker, score, alert['price'], alert['reason'], 
                         alert['stop_loss'], alert['support'], alert['df'], filename,
@@ -1615,7 +1604,6 @@ async def watch_add(interaction: discord.Interaction, codes: str):
     current_set.update(new_list)
     user_data["stocks"] = list(current_set)
     save_settings()
-    # 重新计算 RVOL 基准
     asyncio.create_task(RVOLCalculator.precalculate_baselines(new_list))
     await interaction.followup.send(f"Added: `{', '.join(new_list)}`")
 
@@ -1662,7 +1650,6 @@ async def watch_import(interaction: discord.Interaction, preset: app_commands.Ch
     current_set.update(new_list)
     user_data["stocks"] = list(current_set)
     save_settings()
-    # 重新计算 RVOL 基准
     asyncio.create_task(RVOLCalculator.precalculate_baselines(new_list))
     await interaction.followup.send(f"Imported {preset.name} ({len(new_list)} stocks).")
 
@@ -1817,7 +1804,6 @@ async def test_command(interaction: discord.Interaction, ticker: str):
     
     logging.info(f"[TEST Command] Testing: {ticker}")
 
-    # 临时计算该股票的 RVOL 基准
     await RVOLCalculator.precalculate_baselines([ticker])
 
     data_map = await fetch_historical_batch([ticker])
@@ -1831,22 +1817,24 @@ async def test_command(interaction: discord.Interaction, ticker: str):
     if ticker in quotes_map:
         df = await asyncio.to_thread(merge_and_recalc_sync, df, quotes_map[ticker])
 
-    # [修改] 解包 anchor_idx
     is_triggered, score, reason, r_l, s_l, anchor_idx, rvol = await check_signals(df, ticker)
     
     price = df['close'].iloc[-1]
-    
     stop_loss, support = calculate_risk_levels(df)
 
     if not reason: 
         reason = f"无明显信号 (得分: {score})"
     
-    # [修改] 传递 anchor_idx
     chart_buf = await generate_chart(df, ticker, r_l, s_l, stop_loss, support, anchor_idx)
     filename = f"{ticker}_test.png"
     
-    # [修改] 传入 rvol
-    embed = create_alert_embed(ticker, score, price, reason, stop_loss, support, df, filename, rvol=rvol)
+    # [修改] 判断是否是低分过滤信号
+    is_filtered = score < CONFIG["SCORE"]["MIN_ALERT_SCORE"]
+    
+    embed = create_alert_embed(
+        ticker, score, price, reason, stop_loss, support, df, filename, 
+        rvol=rvol, is_filtered=is_filtered
+    )
 
     try:
         f = discord.File(chart_buf, filename=filename)
