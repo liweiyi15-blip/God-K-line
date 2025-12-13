@@ -49,7 +49,7 @@ TIME_MARKET_OPEN = time(9, 30)
 TIME_MARKET_SCAN_START = time(10, 0) # 10点才开始报
 TIME_MARKET_CLOSE = time(16, 0)
 
-# --- 核心策略配置 (Buy The Dip 版本) ---
+# --- 核心策略配置 (RVOL 加强版) ---
 CONFIG = {
     # [1] 过滤器：左侧抄底核心
     "filter": {
@@ -58,7 +58,9 @@ CONFIG = {
         "max_bias_50": 0.20,          # [防回落] 现价偏离 50日均线 20% 以上不看
         "max_upper_shadow": 0.4,      # [防抛压] 上影线长度占整根K线 40% 以上不看
         "max_day_change": 0.7,        # [防妖股] 单日涨跌幅超过 70% 不看
-        "min_vol_ratio": 1.15,        # [资金门槛] 量比阈值
+        
+        "min_rvol": 1.2,              # [核心修改] RVOL 必须 > 1.2 (比历史同期活跃20%以上)
+        
         "min_bb_squeeze_width": 0.08, # [布林带] 盘整带宽
         "min_bb_expand_width": 0.095, # [布林带] 开口带宽
         "max_bottom_pos": 0.30,       # [位置] 价格处于低位
@@ -82,28 +84,30 @@ CONFIG = {
         "MIN_ALERT_SCORE": 70,        # [及格线]
         
         "PARAMS": {
-            "heavy_vol_multiplier": 1.55,   # [巨量]
+            "rvol_heavy": 2.0,              # [新增] RVOL > 2.0 视为机构大单扫货
+            "rvol_capitulation": 2.5,       # [新增] 恐慌抛售时的量能要求
+            
             "adx_strong_threshold": 25,     # [强趋势]
             "adx_activation_lower": 20,     # [趋势激活]
             "kdj_j_oversold": 0,            # [超卖]
-            "divergence_price_tolerance": 1.02, # [背离] 价格容差
-            "divergence_macd_strength": 0.8,    # [背离] MACD 系数
-            "obv_lookback": 5,              # [资金] OBV 回溯
-            "capitulation_vol_mult": 2,     # [抛售] 量比
-            "capitulation_pinbar": 0.5,     # [金针]
-            "capitulation_mcap": 5_000_000_000 
+            "divergence_price_tolerance": 1.02, 
+            "divergence_macd_strength": 0.8,    
+            "obv_lookback": 5,              
+            "capitulation_pinbar": 0.5      
         },
 
         # 每个信号对应的分值
         "WEIGHTS": {
-            "PATTERN_BREAK": 40,    # 旗形突破 (优先级最高)
-            "PATTERN_SUPPORT": 20,  # 旗形支撑回踩 (新增，与突破互斥)
+            "PATTERN_BREAK": 40,    # 旗形突破
+            "PATTERN_SUPPORT": 20,  # 旗形支撑
             "BB_SQUEEZE": 35,       # 布林带挤压
             "STRONG_ADX": 20,       # 强趋势
             "ADX_ACTIVATION": 25,   # 趋势启动
             "OBV_TREND_UP": 15,     # 资金流入
-            "CAPITULATION": 20,     # 抛售高潮
-            "HEAVY_VOLUME": 10,     # 放量
+            
+            "CAPITULATION": 25,     # [加强] 抛售高潮 (配合 RVOL 验证)
+            "HEAVY_INSTITUTIONAL": 20, # [新增] 纯粹的机构异动 (高 RVOL)
+            
             "MACD_ZERO_CROSS": 10,  # MACD 金叉
             "MACD_DIVERGE": 15,     # MACD 底背离
             "KDJ_REBOUND": 10,      # KDJ 反弹
@@ -137,6 +141,8 @@ STOCK_POOLS = {
 }
 
 settings = {}
+# [新增] RVOL 全局缓存
+rvol_baseline_cache = {} 
 
 # --- 辅助函数 ---
 def load_settings():
@@ -168,6 +174,99 @@ def get_user_data(user_id):
     if uid_str not in settings["users"]:
         settings["users"][uid_str] = {"stocks": [], "daily_status": {}}
     return settings["users"][uid_str]
+
+# -----------------------------------------------------------------------------
+# [核心新增] RVOL 计算器 (空间换时间)
+# -----------------------------------------------------------------------------
+class RVOLCalculator:
+    """
+    负责在开盘前或启动时，一次性计算股票的成交量基准线。
+    """
+    @staticmethod
+    async def precalculate_baselines(symbols):
+        global rvol_baseline_cache
+        logging.info(f"Start pre-calculating RVOL baselines for {len(symbols)} tickers...")
+        
+        # 过去 20 天数据
+        start_date = (datetime.now() - timedelta(days=25)).strftime("%Y-%m-%d")
+        end_date = datetime.now().strftime("%Y-%m-%d")
+        
+        connector = aiohttp.TCPConnector(limit=5)
+        semaphore = asyncio.Semaphore(5)
+        
+        async def fetch_intraday(session, sym):
+            # FMP 5分钟 历史数据
+            url = f"https://financialmodelingprep.com/stable/historical-chart/5min/{sym}?from={start_date}&to={end_date}&apikey={FMP_API_KEY}"
+            async with semaphore:
+                retries = 3
+                for i in range(retries):
+                    try:
+                        async with session.get(url, ssl=False) as resp:
+                            if resp.status == 200:
+                                data = await resp.json()
+                                return sym, data
+                            elif resp.status == 429:
+                                await asyncio.sleep(2)
+                                continue
+                    except: pass
+                    await asyncio.sleep(0.5)
+            return sym, []
+
+        async with aiohttp.ClientSession(connector=connector) as session:
+            tasks = [fetch_intraday(session, sym) for sym in symbols]
+            results = await asyncio.gather(*tasks)
+
+        count_ok = 0
+        for sym, data in results:
+            if not data: continue
+            
+            try:
+                df = pd.DataFrame(data)
+                if 'date' not in df.columns or 'volume' not in df.columns: continue
+                
+                # 转换时间
+                df['date'] = pd.to_datetime(df['date']).dt.tz_localize('UTC').dt.tz_convert(MARKET_TIMEZONE)
+                df['time_str'] = df['date'].dt.strftime('%H:%M')
+                df['date_only'] = df['date'].dt.date
+                
+                # 过滤交易时间
+                df = df[(df['time_str'] >= '09:30') & (df['time_str'] <= '16:00')]
+                
+                # [关键] 计算每一天的“累计成交量” (Cumulative Volume)
+                # 只有对比累计值，才能和 Quote 接口返回的 Daily Volume 进行比较
+                df = df.sort_values('date')
+                df['cum_vol'] = df.groupby('date_only')['volume'].cumsum()
+                
+                # 计算基准线：每个时间点的中位数累计成交量
+                baseline = df.groupby('time_str')['cum_vol'].median()
+                
+                rvol_baseline_cache[sym] = baseline.to_dict()
+                count_ok += 1
+            except Exception as e:
+                logging.error(f"Error processing RVOL for {sym}: {e}")
+            
+        logging.info(f"RVOL Baselines calculated for {count_ok} stocks.")
+
+    @staticmethod
+    def get_current_rvol(ticker, current_cum_vol, ny_time):
+        """
+        计算当前的 RVOL
+        current_cum_vol: 今天截止目前的总成交量 (从 quote['volume'] 获取)
+        """
+        if ticker not in rvol_baseline_cache:
+            return 1.0 # 无基准数据，默认 1.0
+            
+        # 找到最近的 5分钟 bucket (向下取整)
+        minute = ny_time.minute
+        floored_minute = (minute // 5) * 5
+        time_key = f"{ny_time.hour:02d}:{floored_minute:02d}"
+        
+        baseline_vol = rvol_baseline_cache[ticker].get(time_key)
+        
+        if not baseline_vol or baseline_vol == 0:
+            return 1.0
+            
+        return current_cum_vol / baseline_vol
 
 # --- 核心逻辑 (指标计算) ---
 def calculate_indicators(df):
@@ -544,28 +643,6 @@ def detect_candle_patterns(df):
     if lower_shadow > 2 * curr_body and upper_shadow < 0.5 * curr_body: patterns.append("锤子线")
     return patterns
 
-def get_volume_projection_factor(ny_now, minutes_elapsed):
-    """
-    根据美股成交量"U型曲线"（Smile Curve）修正后的推算因子。
-    [修改] 最后乘以 0.8，解决预估偏高 20% 的问题。
-    """
-    TOTAL_MINUTES = 390.0
-    if minutes_elapsed < 1: return 1.0 
-    estimated_completion = 0.0
-    if minutes_elapsed <= 30:
-        estimated_completion = (minutes_elapsed / 30.0) * 0.20
-    elif minutes_elapsed <= 60:
-        estimated_completion = 0.20 + ((minutes_elapsed - 30) / 30.0) * 0.10
-    elif minutes_elapsed <= 360:
-        estimated_completion = 0.30 + ((minutes_elapsed - 60) / 300.0) * 0.60
-    else:
-        estimated_completion = 0.90 + ((minutes_elapsed - 360) / 30.0) * 0.10
-    if estimated_completion <= 0.01: return 1.0 
-    
-    # [修改] 乘以 0.8 进行打折修正
-    factor = (1.0 / estimated_completion) * 0.8
-    return factor
-
 def calculate_risk_levels(df):
     curr_close = df['close'].iloc[-1]
     atr = df['ATR'].iloc[-1] if 'ATR' in df.columns else curr_close * 0.05
@@ -578,13 +655,13 @@ def calculate_risk_levels(df):
     return stop_loss, support
 
 # -----------------------------------------------------------------------------
-# [核心修改] 纯粹 Buy The Dip 逻辑 (新增旗形支撑判定)
+# [核心修改] 整合 RVOL 的信号检查
 # -----------------------------------------------------------------------------
-def check_signals_sync(df):
-    if len(df) < 60: return False, 0, "数据不足", [], [], None
+def check_signals_sync(df, ticker): # [修改] 传入 ticker
+    if len(df) < 60: return False, 0, "数据不足", [], [], None, 1.0
     last_date = df.index[-1].date()
     today_date = datetime.now(MARKET_TIMEZONE).date()
-    if (today_date - last_date).days > 4: return False, 0, f"DATA_STALE: 数据严重滞后 ({last_date})", [], [], None
+    if (today_date - last_date).days > 4: return False, 0, f"DATA_STALE: 数据严重滞后 ({last_date})", [], [], None, 1.0
 
     curr = df.iloc[-1]
     prev = df.iloc[-2]
@@ -609,29 +686,32 @@ def check_signals_sync(df):
     if curr['BIAS_50'] > CONFIG["filter"]["max_bias_50"]: violations.append("过滤器: 乖离率过大")
     if curr['Upper_Shadow_Ratio'] > CONFIG["filter"]["max_upper_shadow"]: violations.append("过滤器: 长上影线压力")
 
-    # 量能检查
+    # --- [关键] RVOL 计算与判定 ---
     ny_now = datetime.now(MARKET_TIMEZONE)
     market_open = ny_now.replace(hour=9, minute=30, second=0, microsecond=0)
     minutes_elapsed = (ny_now - market_open).total_seconds() / 60
     is_open_market = 0 < minutes_elapsed < 390
+    
+    # 获取实时 RVOL
+    rvol = 1.0
     is_volume_ok = False
-    proj_vol_final = curr['volume']
     
-    if is_open_market:
-        if minutes_elapsed < 5: 
-             is_volume_ok = True 
-             proj_vol_final = curr['volume'] 
-        else:
-            proj_factor = get_volume_projection_factor(ny_now, max(minutes_elapsed, 1))
-            proj_vol_final = curr['volume'] * proj_factor
-            if proj_vol_final >= curr['Vol_MA20'] * CONFIG["filter"]["min_vol_ratio"]: 
-                is_volume_ok = True
-    else:
-        if curr['volume'] >= curr['Vol_MA20'] * CONFIG["filter"]["min_vol_ratio"]: 
+    if is_open_market and minutes_elapsed > 5:
+        # 使用我们的 RVOLCalculator
+        rvol = RVOLCalculator.get_current_rvol(ticker, curr['volume'], ny_now)
+        
+        if rvol >= CONFIG["filter"]["min_rvol"]:
             is_volume_ok = True
+    else:
+        # 盘前盘后或刚开盘，不看 RVOL
+        is_volume_ok = True 
+        
+    if not is_volume_ok: violations.append(f"过滤器: 资金不活跃 (RVOL {rvol:.2f} < 1.2)")
     
-    if not is_volume_ok: violations.append("过滤器: 量能不足")
-    if proj_vol_final > curr['Vol_MA20'] * params["heavy_vol_multiplier"]: score += weights["HEAVY_VOLUME"]
+    # [评分] 机构大单扫货信号 (纯量能加分)
+    if rvol > params["rvol_heavy"]:
+        triggers.append(f"机构进场: 异常放量 (RVOL {rvol:.1f}x)")
+        score += weights["HEAVY_INSTITUTIONAL"]
 
     candle_patterns = detect_candle_patterns(df)
     if candle_patterns:
@@ -666,8 +746,7 @@ def check_signals_sync(df):
 
     # [新增] 旗形突破与支撑逻辑
     pattern_name, res_line, sup_line, anchor_idx, sup_slope, sup_intercept = identify_patterns(df)
-    
-    pattern_scored = False # 互斥锁
+    pattern_scored = False 
     
     # 1. 优先判断突破 (40分)
     if pattern_name:
@@ -676,27 +755,20 @@ def check_signals_sync(df):
         pattern_scored = True
     
     # 2. 如果没有突破，判断是否在支撑线附近 (20分)
-    # 只有当 identify_patterns 返回了有效的支撑线斜率和截距时才计算
     if not pattern_scored and sup_slope is not None:
         curr_idx = len(df) - 1
-        
-        # 内部函数：计算某一天支撑线价格
         def get_sup_price(idx): return sup_slope * idx + sup_intercept
         
         curr_sup = get_sup_price(curr_idx)
-        # 当前价格必须在 [支撑线, 支撑线+2%] 之间 (宽容度2%)
-        # 允许微小刺破 (例如 0.995)，但主要是站稳
         is_on_support_now = (curr['close'] >= curr_sup * 0.995) and (curr['close'] <= curr_sup * 1.02)
         
         if is_on_support_now:
-            # 条件A: 触碰到旗型支撑附近(宽容度支撑线上2%以内）四个交易日后还在这个区间内
-            # 逻辑：检查过去 4 天内，是否有 Low 触碰过支撑区间
+            # 条件A: 触底企稳
             was_touching = False
             start_check_idx = max(0, curr_idx - 4)
             for i in range(start_check_idx, curr_idx):
                 sup_at_i = get_sup_price(i)
                 low_at_i = df['low'].iloc[i]
-                # 只要最低价踩到过支撑线附近 (1.02以内)
                 if low_at_i <= sup_at_i * 1.02:
                     was_touching = True
                     break
@@ -706,18 +778,15 @@ def check_signals_sync(df):
                 score += weights["PATTERN_SUPPORT"]
                 pattern_scored = True
             
-            # 条件B: 跌破支撑线后回踩线上之后三个交易日后还在支撑线上2%内
-            # 逻辑：如果没有触发条件A，检查是否有过跌破后收回
+            # 条件B: 假摔回踩
             if not pattern_scored:
                 was_broken = False
-                # 检查过去 6 天内是否有收盘价跌破支撑线
                 start_check_idx = max(0, curr_idx - 6)
-                for i in range(start_check_idx, curr_idx - 2): # 至少预留2-3天回踩时间
+                for i in range(start_check_idx, curr_idx - 2): 
                     sup_at_i = get_sup_price(i)
                     if df['close'].iloc[i] < sup_at_i:
                         was_broken = True
                         break
-                
                 if was_broken:
                     triggers.append("旗形支撑: 假摔回踩 (3日确认)")
                     score += weights["PATTERN_SUPPORT"]
@@ -750,19 +819,21 @@ def check_signals_sync(df):
              triggers.append("资金面: OBV趋势向上 (资金流入)")
              score += weights["OBV_TREND_UP"]
 
-    # [F] 抛售高潮 (恐慌盘)
+    # [F] 抛售高潮 (结合 RVOL 验证)
+    # 逻辑：价格跌破布林下轨 + 极度恐慌的抛盘量(RVOL > 2.5) = 绝佳的恐慌底
     if curr['low'] < curr['BB_Low']: 
-        if proj_vol_final > curr['Vol_MA20'] * params["capitulation_vol_mult"]:
-            triggers.append(f"抛售高潮: 恐慌放量 (量比 {proj_vol_final/curr['Vol_MA20']:.1f}x)")
+        if rvol > params["rvol_capitulation"]:
+            triggers.append(f"抛售高潮: 恐慌盘涌出 (RVOL {rvol:.1f})")
             score += weights["CAPITULATION"]
 
     is_triggered = (score >= CONFIG["SCORE"]["MIN_ALERT_SCORE"]) and (len(violations) == 0)
     final_reason_parts = triggers + violations
     final_reason = "\n".join(final_reason_parts) if final_reason_parts else "无明显信号"
-    return is_triggered, score, final_reason, res_line, sup_line, anchor_idx
+    
+    return is_triggered, score, final_reason, res_line, sup_line, anchor_idx, rvol
 
-async def check_signals(df):
-    return await asyncio.to_thread(check_signals_sync, df)
+async def check_signals(df, ticker):
+    return await asyncio.to_thread(check_signals_sync, df, ticker)
 
 # -----------------------------------------------------------------------------
 # 图表生成函数
@@ -790,9 +861,7 @@ def _generate_chart_sync(df, ticker, res_line=[], sup_line=[], stop_price=None, 
         price_max = valid_df['high'].max()
         bins = np.linspace(price_min, price_max, 50)
         
-        # 涨 (Close >= Open) -> Bull (Red)
         bull_df = valid_df[valid_df['close'] >= valid_df['open']]
-        # 跌 (Close < Open) -> Bear (Green)
         bear_df = valid_df[valid_df['close'] < valid_df['open']]
         
         vol_bull, _ = np.histogram(bull_df['close'], bins=bins, weights=bull_df['volume'])
@@ -847,7 +916,6 @@ def _generate_chart_sync(df, ticker, res_line=[], sup_line=[], stop_price=None, 
     text_color = '#b2b5be'
     volume_color = '#3b404e'
     
-    # [修改] 红涨绿跌配色
     my_marketcolors = mpf.make_marketcolors(
         up='#d93025',   # 红色 (涨)
         down='#1db954', # 绿色 (跌)
@@ -917,10 +985,7 @@ def _generate_chart_sync(df, ticker, res_line=[], sup_line=[], stop_price=None, 
             ax_vp.set_xlim(0, max_vol * 4) 
             ax_vp.invert_xaxis() 
             
-            # [修改] 红涨绿跌适配 Volume Profile
-            # 跌量 (Green)
             ax_vp.barh(bin_centers, vol_bear, height=bar_height, color='#1db954', alpha=0.06, align='center', zorder=0)
-            # 涨量 (Red)
             ax_vp.barh(bin_centers, vol_bull, height=bar_height, color='#d93025', alpha=0.06, align='center', left=vol_bear, zorder=0)
             ax_vp.axis('off')
 
@@ -1003,9 +1068,8 @@ def get_level_by_score(score):
     if score >= 70: return CONFIG["SCORE"]["EMOJI"].get(70, "LOW")
     return CONFIG["SCORE"]["EMOJI"].get(60, "TEST") 
 
-def create_alert_embed(ticker, score, price, reason, stop_loss, support, df, filename):
+def create_alert_embed(ticker, score, price, reason, stop_loss, support, df, filename, rvol=None):
     level_str = get_level_by_score(score)
-    # [修改] 检查 "过滤器" 关键字
     if "过滤器" in reason or "STALE" in reason:
         color = 0x95a5a6 
     else:
@@ -1015,27 +1079,15 @@ def create_alert_embed(ticker, score, price, reason, stop_loss, support, df, fil
     embed.description = f"**现价:** `${price:.2f}`"
       
     curr = df.iloc[-1]
-      
-    ny_now = datetime.now(MARKET_TIMEZONE)
-    market_open = ny_now.replace(hour=9, minute=30, second=0, microsecond=0)
-    minutes_elapsed = (ny_now - market_open).total_seconds() / 60
-      
-    vol_label = "**量比 (预估):**"
-    vol_ratio = 0.0
-      
-    if 0 < minutes_elapsed < 390:
-        proj_factor = get_volume_projection_factor(ny_now, max(minutes_elapsed, 1))
-        projected_vol = curr['volume'] * proj_factor
-        vol_ratio = projected_vol / df['Vol_MA20'].iloc[-1]
-    else:
-        vol_ratio = curr['volume'] / df['Vol_MA20'].iloc[-1]
-      
     obv_status = "流入" if curr['OBV'] > curr['OBV_MA20'] else "流出"
+    
+    # 显示 RVOL
+    vol_str = f"`{rvol:.2f}x`" if rvol else "N/A"
     
     indicator_text = (
         f"**RSI(14):** `{curr['RSI']:.1f}`\n"
         f"**ADX:** `{curr['ADX']:.1f}`\n"
-        f"{vol_label} `{vol_ratio:.1f}x`\n" 
+        f"**RVOL:** {vol_str}\n" 
         f"**OBV:** `{obv_status}`\n"
         f"**Bias(50):** `{curr['BIAS_50']*100:.1f}%`"
     )
@@ -1068,7 +1120,10 @@ class StockBotClient(discord.Client):
                 logging.error(f"Could not find channel with ID {ALERT_CHANNEL_ID}")
         else:
             logging.warning("No ALERT_CHANNEL_ID provided in env.")
-            
+        
+        # [启动] 后台初始化 RVOL 基准线
+        asyncio.create_task(self.initialize_baselines())
+
         if not self.monitor_stocks.is_running():
             self.monitor_stocks.start()
         
@@ -1076,6 +1131,19 @@ class StockBotClient(discord.Client):
             self.scheduled_report.start()
             
         await self.tree.sync()
+
+    async def initialize_baselines(self):
+        """初始化 RVOL 基准线"""
+        users_data = settings.get("users", {})
+        all_tickers = set()
+        for u in users_data.values():
+            all_tickers.update(u.get("stocks", []))
+        
+        for pool in STOCK_POOLS.values():
+            all_tickers.update(pool)
+            
+        if all_tickers:
+            await RVOLCalculator.precalculate_baselines(list(all_tickers))
 
     async def send_daily_stats_report(self):
         if not self.alert_channel: return
@@ -1280,8 +1348,8 @@ class StockBotClient(discord.Client):
                     last_signal_score = history[past_date][ticker].get("score", 0)
                     in_cooldown = True 
             
-            # [修改] 解包 anchor_idx
-            is_triggered, score, reason, res_line, sup_line, anchor_idx = await check_signals(df)
+            # [修改] 传递 ticker 接收 rvol
+            is_triggered, score, reason, res_line, sup_line, anchor_idx, rvol = await check_signals(df, ticker)
             
             today_signal_data = settings["signal_history"][today_str].get(ticker)
             if today_signal_data:
@@ -1311,8 +1379,9 @@ class StockBotClient(discord.Client):
                     "df": df,
                     "res_line": res_line,
                     "sup_line": sup_line,
-                    "anchor_idx": anchor_idx, # [新增] 保存 anchor_idx
-                    "users": users_to_ping
+                    "anchor_idx": anchor_idx, 
+                    "users": users_to_ping,
+                    "rvol": rvol # [新增] 保存 RVOL
                 }
                 alerts_buffer.append(alert_obj)
 
@@ -1353,9 +1422,11 @@ class StockBotClient(discord.Client):
                     )
                     filename = f"{ticker}.png"
                     
+                    # [修改] 传入 rvol
                     embed = create_alert_embed(
                         ticker, score, alert['price'], alert['reason'], 
-                        alert['stop_loss'], alert['support'], alert['df'], filename
+                        alert['stop_loss'], alert['support'], alert['df'], filename,
+                        rvol=alert["rvol"]
                     )
                     
                     try:
@@ -1399,6 +1470,8 @@ async def watch_add(interaction: discord.Interaction, codes: str):
     current_set.update(new_list)
     user_data["stocks"] = list(current_set)
     save_settings()
+    # 重新计算 RVOL 基准
+    asyncio.create_task(RVOLCalculator.precalculate_baselines(new_list))
     await interaction.followup.send(f"Added: `{', '.join(new_list)}`")
 
 @client.tree.command(name="watch_remove", description="Remove stocks from watch list")
@@ -1444,6 +1517,8 @@ async def watch_import(interaction: discord.Interaction, preset: app_commands.Ch
     current_set.update(new_list)
     user_data["stocks"] = list(current_set)
     save_settings()
+    # 重新计算 RVOL 基准
+    asyncio.create_task(RVOLCalculator.precalculate_baselines(new_list))
     await interaction.followup.send(f"Imported {preset.name} ({len(new_list)} stocks).")
 
 @client.tree.command(name="stats", description="View historical signal accuracy (20-day window)")
@@ -1597,6 +1672,9 @@ async def test_command(interaction: discord.Interaction, ticker: str):
     
     logging.info(f"[TEST Command] Testing: {ticker}")
 
+    # 临时计算该股票的 RVOL 基准
+    await RVOLCalculator.precalculate_baselines([ticker])
+
     data_map = await fetch_historical_batch([ticker])
     quotes_map = await fetch_realtime_quotes([ticker])
     
@@ -1609,7 +1687,7 @@ async def test_command(interaction: discord.Interaction, ticker: str):
         df = await asyncio.to_thread(merge_and_recalc_sync, df, quotes_map[ticker])
 
     # [修改] 解包 anchor_idx
-    is_triggered, score, reason, r_l, s_l, anchor_idx = await check_signals(df)
+    is_triggered, score, reason, r_l, s_l, anchor_idx, rvol = await check_signals(df, ticker)
     
     price = df['close'].iloc[-1]
     
@@ -1622,7 +1700,8 @@ async def test_command(interaction: discord.Interaction, ticker: str):
     chart_buf = await generate_chart(df, ticker, r_l, s_l, stop_loss, support, anchor_idx)
     filename = f"{ticker}_test.png"
     
-    embed = create_alert_embed(ticker, score, price, reason, stop_loss, support, df, filename)
+    # [修改] 传入 rvol
+    embed = create_alert_embed(ticker, score, price, reason, stop_loss, support, df, filename, rvol=rvol)
 
     try:
         f = discord.File(chart_buf, filename=filename)
