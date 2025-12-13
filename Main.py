@@ -1163,52 +1163,71 @@ def _generate_chart_sync(df, ticker, res_line=[], sup_line=[], stop_price=None, 
     return buf
 
 # -----------------------------------------------------------------------------
-# [Async Wrapper for Chart Generation]
-# -----------------------------------------------------------------------------
-async def generate_chart(df, ticker, res_line=[], sup_line=[], stop_price=None, support_price=None, anchor_idx=None):
-    return await asyncio.to_thread(_generate_chart_sync, df, ticker, res_line, sup_line, stop_price, support_price, anchor_idx)
-
-# -----------------------------------------------------------------------------
-# [FIXED] 补充缺失的 Embed 生成函数
+# [FIXED] 补充缺失的 Embed 生成函数 (标题固定版)
 # -----------------------------------------------------------------------------
 def create_alert_embed(ticker, score, price, reason, stop_loss, support, df, filename, rvol=None, is_filtered=False):
     """
-    生成报警 Embed 对象
+    生成完美复刻图片排版的 Embed 对象 (固定标题)
     """
-    # 颜色与标题前缀逻辑
-    if is_filtered:
-        color = 0x95a5a6 # 灰色
-        title = f"⚪ 观察: {ticker}"
-    elif score >= 90:
-        color = 0xffd700 # 金色
-        title = f"🔥 极佳: {ticker}"
-    elif score >= 80:
-        color = 0x2ecc71 # 绿色
-        title = f"🚀 强力: {ticker}"
-    else:
-        color = 0x3498db # 蓝色
-        title = f"📢 关注: {ticker}"
+    # 标题永远固定格式，不再根据分数变化
+    title = f"🚨 {ticker} 抄底信号 | 得分 {score}"
+    
+    # 颜色也统一固定为红色 (匹配 🚨 图标)，保持视觉一致性
+    color = 0xe74c3c # 红色
 
     embed = discord.Embed(
         title=title,
-        description=f"**当前价:** `{price:.2f}`\n**得分:** `{score}`\n\n**触发理由:**\n{reason}",
+        description=f"**现价:** `${price:.2f}`",
         color=color,
         timestamp=datetime.now(MARKET_TIMEZONE)
     )
 
-    embed.add_field(name="🛑 止损价", value=f"`{stop_loss:.2f}`", inline=True)
-    embed.add_field(name="🛡️ 支撑位", value=f"`{support:.2f}`", inline=True)
-    
-    # 提取最后一行数据的指标
+    # 2. 准备指标数据
     if not df.empty:
         curr = df.iloc[-1]
-        rvol_str = f"{rvol:.2f}" if rvol is not None else "N/A"
-        rsi_val = curr['RSI'] if 'RSI' in df.columns else 0
-        adx_val = curr['ADX'] if 'ADX' in df.columns else 0
-        embed.add_field(name="📊 指标", value=f"RVOL: `{rvol_str}`\nRSI: `{rsi_val:.1f}`\nADX: `{adx_val:.1f}`", inline=True)
+        
+        # 格式化数值，使用 `code` 样式
+        rsi_val = f"{curr['RSI']:.1f}" if 'RSI' in df.columns else "N/A"
+        adx_val = f"{curr['ADX']:.1f}" if 'ADX' in df.columns else "N/A"
+        rvol_val = f"{rvol:.2f}x" if rvol is not None else "1.00x"
+        bias_val = f"{curr['BIAS_50']*100:.1f}%" if 'BIAS_50' in df.columns else "N/A"
+        
+        # 简易 OBV 状态判断
+        obv_val = curr['OBV'] if 'OBV' in df.columns else 0
+        obv_ma = curr['OBV_MA20'] if 'OBV_MA20' in df.columns else 0
+        obv_status = "流入" if obv_val > obv_ma else "流出"
 
+        # 3. 构建双列布局 (使用 Zero Width Space \u200b 作为字段名以隐藏标题)
+        
+        # 左列：技术指标
+        left_col = (
+            f"**RSI(14):** `{rsi_val}`\n"
+            f"**ADX:** `{adx_val}`\n"
+            f"**RVOL:** `{rvol_val}`\n"
+            f"**OBV:** `{obv_status}`\n"
+            f"**Bias(50):** `{bias_val}`"
+        )
+        
+        # 右列：价格水平
+        right_col = (
+            f"**止损价:** `${stop_loss:.2f}`\n"
+            f"**支撑位:** `${support:.2f}`"
+        )
+
+        embed.add_field(name="\u200b", value=left_col, inline=True)
+        embed.add_field(name="\u200b", value=right_col, inline=True)
+
+    # 4. 底部灰色信息框 (Reason)
+    # 将理由放入代码块中以实现灰色背景效果
+    if reason:
+        embed.add_field(name="\u200b", value=f"```\n{reason}\n```", inline=False)
+    else:
+        embed.add_field(name="\u200b", value="```\n无额外详细信息\n```", inline=False)
+
+    # 5. 图片与页脚
     embed.set_image(url=f"attachment://{filename}")
     embed.set_footer(text=f"StockBot Analysis | {ticker}")
+    
     return embed
 
 async def update_stats_data():
