@@ -49,7 +49,7 @@ TIME_MARKET_OPEN = time(9, 30)
 TIME_MARKET_SCAN_START = time(10, 0) # 10点才开始报
 TIME_MARKET_CLOSE = time(16, 0)
 
-# --- 核心策略配置 (RVOL 加强版 + 四维共振 + 动态布林) ---
+# --- 核心策略配置 (RVOL 加强版 + 四维共振 + 全动态布林 + 可配旗形) ---
 CONFIG = {
     # [1] 过滤器：左侧抄底核心 (一票否决制)
     "filter": {
@@ -61,9 +61,11 @@ CONFIG = {
         
         "min_rvol": 1.2,              # [核心] RVOL 必须 > 1.2 (比历史同期活跃20%以上)
         
-        # [布林带动态配置 - 修改部分]
-        "min_bb_squeeze_width": 0.10, # [前置条件] 昨日带宽需小于此值 (定义什么是"窄")
-        "bb_expansion_rate": 1.2,     # [动态扩张] 今天带宽 / 昨天带宽 >= 1.2 (即扩大20%才算开口)
+        # [布林带动态配置 - 全动态版]
+        "bb_squeeze_days": 5,         # [挤压窗口] 回溯考察过去多少天
+        "bb_squeeze_tolerance": 0.03, # [带宽稳定] 考察期内，带宽最大值与最小值的差需小于此值
+        "max_consolidation_amp": 0.05,# [股价横盘] 考察期内，股价(High-Low)/Low 的振幅需小于 5%
+        "bb_expansion_rate": 1.2,     # [动态扩张] 今天带宽 / 考察期平均带宽 >= 1.2 (扩大20%)
         
         "max_bottom_pos": 0.30,       # [位置] 价格在过去60天区间的位置 (0.3表示底部30%)
         "min_adx_for_squeeze": 15     # [趋势] ADX 最小门槛，确保不是死水
@@ -71,7 +73,11 @@ CONFIG = {
 
     # [2] 形态识别
     "pattern": {
-        "pivot_window": 10            # [关键点] 识别高低点的前后窗口天数
+        "pivot_window": 10,           # [关键点] 识别高低点的前后窗口天数
+        
+        # [旗形支撑 - 横盘整理参数]
+        "support_tolerance": 0.02,    # [宽容度] 价格在支撑线(上下2%)范围内视为"踩稳/横盘"
+        "support_window": 4           # [企稳天数] 检查过去4天是否有触碰支撑的行为 (确认支撑有效)
     },
 
     # [3] 系统设置
@@ -727,13 +733,17 @@ def check_signals_sync(df, ticker): # [修改] 传入 ticker
     # ============================================================
     pattern_name, res_line, sup_line, anchor_idx, sup_slope, sup_intercept = identify_patterns(df)
     
+    # [新增] 读取旗形参数
+    sup_tolerance = CONFIG["pattern"]["support_tolerance"]
+    sup_window = CONFIG["pattern"]["support_window"]
+    
     # 判断是否处于“支撑线”附近 (为了给“底部休眠”发免死金牌)
     is_structure_support = False
     if sup_slope is not None:
         curr_idx = len(df) - 1
         curr_sup_price = sup_slope * curr_idx + sup_intercept
-        # 如果当前价格在支撑线附近 (0.98 ~ 1.03)
-        if 0.98 <= curr['close'] / curr_sup_price <= 1.03:
+        # 根据配置的宽容度计算
+        if (1 - sup_tolerance/2) <= curr['close'] / curr_sup_price <= (1 + sup_tolerance):
             is_structure_support = True
     # ============================================================
 
@@ -778,22 +788,38 @@ def check_signals_sync(df, ticker): # [修改] 传入 ticker
 
     # --- 纯粹抄底信号逻辑 ---
     
-    # [A] 布林带挤压 + 低位 (修改为动态比例)
-    bb_squeeze_limit = CONFIG["filter"]["min_bb_squeeze_width"]
+    # [A] 布林带挤压 + 低位 (全动态逻辑)
+    bb_squeeze_days = CONFIG["filter"]["bb_squeeze_days"]
+    bb_squeeze_tol = CONFIG["filter"]["bb_squeeze_tolerance"]
     bb_expand_rate = CONFIG["filter"]["bb_expansion_rate"]
+    max_cons_amp = CONFIG["filter"].get("max_consolidation_amp", 0.05)
     max_pos = CONFIG["filter"]["max_bottom_pos"]
     price_pos = (curr['close'] - low_60) / (high_60 - low_60) if high_60 > low_60 else 0.5
     
-    if prev['BB_Width'] < bb_squeeze_limit: 
-        # 计算扩张比例
-        prev_width_safe = prev['BB_Width'] if prev['BB_Width'] > 0 else 0.001
-        width_ratio = curr['BB_Width'] / prev_width_safe
+    if len(df) > bb_squeeze_days + 1:
+        # 提取过去 N 天（不含今天）的数据
+        past_widths = df['BB_Width'].iloc[-(bb_squeeze_days+1):-1]
+        past_closes = df['close'].iloc[-(bb_squeeze_days+1):-1]
         
-        if width_ratio >= bb_expand_rate: 
-            if curr['close'] > curr['open']: 
-                 if price_pos <= max_pos: 
-                    triggers.append(f"BB Squeeze: 变盘启动 (前宽:{prev['BB_Width']:.3f}, 扩张:{width_ratio:.2f}x)")
-                    score += weights["BB_SQUEEZE"]
+        # 计算过去几天的带宽极差 (Max - Min)
+        width_diff = past_widths.max() - past_widths.min()
+        
+        # 计算过去几天的股价振幅 (High - Low) / Low (简化为 MaxClose-MinClose / MinClose)
+        price_amp = (past_closes.max() - past_closes.min()) / past_closes.min()
+        
+        # 逻辑：过去稳定（带宽波动小 + 股价横盘）+ 今天爆发
+        is_stable_width = width_diff <= bb_squeeze_tol
+        is_sideways_price = price_amp <= max_cons_amp
+        
+        if is_stable_width and is_sideways_price:
+            avg_width = past_widths.mean()
+            width_ratio = curr['BB_Width'] / avg_width if avg_width > 0 else 1.0
+            
+            if width_ratio >= bb_expand_rate:
+                if curr['close'] > curr['open']: # 必须收阳
+                    if price_pos <= max_pos: # 必须低位
+                        triggers.append(f"BB Squeeze: 盘整启动 (稳{bb_squeeze_days}日, 扩{width_ratio:.2f}x)")
+                        score += weights["BB_SQUEEZE"]
 
     # [B] ADX 趋势启动
     is_strong_trend = curr['ADX'] > params["adx_strong_threshold"] and curr['PDI'] > curr['MDI']
@@ -822,21 +848,22 @@ def check_signals_sync(df, ticker): # [修改] 传入 ticker
         def get_sup_price(idx): return sup_slope * idx + sup_intercept
         
         curr_sup = get_sup_price(curr_idx)
-        is_on_support_now = (curr['close'] >= curr_sup * 0.995) and (curr['close'] <= curr_sup * 1.02)
+        # 使用动态宽容度配置
+        is_on_support_now = (1 - sup_tolerance/2) <= curr['close'] / curr_sup <= (1 + sup_tolerance)
         
         if is_on_support_now:
-            # 条件A: 触底企稳
+            # 条件A: 触底企稳 (使用配置的回溯窗口)
             was_touching = False
-            start_check_idx = max(0, curr_idx - 4)
+            start_check_idx = max(0, curr_idx - sup_window)
             for i in range(start_check_idx, curr_idx):
                 sup_at_i = get_sup_price(i)
                 low_at_i = df['low'].iloc[i]
-                if low_at_i <= sup_at_i * 1.02:
+                if low_at_i <= sup_at_i * (1 + sup_tolerance):
                     was_touching = True
                     break
             
             if was_touching:
-                triggers.append("旗形支撑: 触底企稳 (4日确认)")
+                triggers.append(f"旗形支撑: 触底企稳 ({sup_window}日确认)")
                 score += weights["PATTERN_SUPPORT"]
                 pattern_scored = True
             
@@ -888,9 +915,6 @@ def check_signals_sync(df, ticker): # [修改] 传入 ticker
             score += weights["CAPITULATION"]
 
     # [新增] 四维共振逻辑 (4D Resonance)
-    # 检测过去 N 天内是否发生了指标的底背离信号
-    # 需要满足：CROSS(指标, 信号线) 且 当前PriceLow < 上一次Cross时的PriceLow 且 当前Indicator > 上一次Cross时的Indicator
-    
     res_cfg = CONFIG["SCORE"]["RESONANCE"]
     res_window = res_cfg["window_days"]
     
@@ -1213,7 +1237,6 @@ def create_alert_embed(ticker, score, price, reason, stop_loss, support, df, fil
     else:
         color = 0x00ff00 if score >= 80 else 0x3498db
     
-    # 标题如果包含不支持的格式字符可能显示异常，故状态在描述中体现
     title_text = f"🚨{ticker} 抄底信号 | 得分 {score}"
     if is_filtered:
         title_text = f"🚫{ticker} 信号拦截 | 得分 {score} (低分)"
@@ -1221,7 +1244,6 @@ def create_alert_embed(ticker, score, price, reason, stop_loss, support, df, fil
       
     embed = discord.Embed(title=title_text, color=color)
     
-    # 描述部分支持 markdown 删除线
     score_display = f"~~{score}~~" if is_filtered else f"{score}"
     embed.description = f"**现价:** `${price:.2f}`\n**得分:** {score_display}"
       
@@ -1396,392 +1418,6 @@ class StockBotClient(discord.Client):
         embed.add_field(name="5日表现", value=mk_field("5d"), inline=True)
         embed.add_field(name="10日表现", value=mk_field("10d"), inline=True)
         embed.add_field(name="20日表现", value=mk_field("20d"), inline=True)
-        
-        recent_list_str = []
-        for date_str, ticker, score, data in valid_signals[:5]:
-            r1 = data.get("ret_1d")
-            r1_str = f"{r1:+.1f}%" if r1 is not None else "-"
-            r5 = data.get("ret_5d")
-            r5_str = f"{r5:+.1f}%" if r5 is not None else "-"
-            r10 = data.get("ret_10d")
-            r10_str = f"{r10:+.1f}%" if r10 is not None else "-"
-            r20 = data.get("ret_20d")
-            r20_str = f"{r20:+.1f}%" if r20 is not None else "-"
-            
-            recent_list_str.append(f"`{date_str}` **{ticker}**\n└ 1D:`{r1_str}` 5D:`{r5_str}` 10D:`{r10_str}` 20D:`{r20_str}`")
-        
-        if recent_list_str:
-            embed.add_field(name="详细情况", value="\n".join(recent_list_str), inline=False)
-        else:
-            embed.add_field(name="详细情况", value="无近期信号", inline=False)
-
-        embed.set_footer(text=f"Report generated at {datetime.now(MARKET_TIMEZONE).strftime('%H:%M:%S')} ET")
-        await self.alert_channel.send(embed=embed)
-
-    @tasks.loop(minutes=1)
-    async def scheduled_report(self):
-        now_et = datetime.now(MARKET_TIMEZONE)
-        if now_et.hour == 16 and now_et.minute == 30:
-            today_date = now_et.date()
-            if self.last_report_date != today_date:
-                await self.send_daily_stats_report()
-                self.last_report_date = today_date
-
-    @tasks.loop(minutes=5)
-    async def monitor_stocks(self):
-        if not self.alert_channel: return
-        now_et = datetime.now(MARKET_TIMEZONE)
-        curr_time, today_str = now_et.time(), now_et.strftime('%Y-%m-%d')
-        
-        is_open_scan = TIME_MARKET_SCAN_START <= curr_time <= TIME_MARKET_CLOSE
-        
-        if not is_open_scan: return
-        
-        logging.info(f"[{now_et.strftime('%H:%M')}] Scanning started...")
-        users_data = settings.get("users", {})
-        all_tickers = set()
-        ticker_user_map = defaultdict(list)
-        
-        for uid, udata in users_data.items():
-            for k in list(udata['daily_status'].keys()):
-                if not k.endswith(today_str): del udata['daily_status'][k]
-            for ticker in udata.get("stocks", []):
-                all_tickers.add(ticker)
-                ticker_user_map[ticker].append(uid)
-
-        if not all_tickers: 
-            logging.info("No tickers to scan.")
-            return
-
-        hist_map = await fetch_historical_batch(list(all_tickers))
-        quotes_map = {}
-        if TIME_MARKET_OPEN <= curr_time <= TIME_MARKET_CLOSE:
-            quotes_map = await fetch_realtime_quotes(list(all_tickers))
-
-        alerts_buffer = []
-        if "signal_history" not in settings: settings["signal_history"] = {}
-        if today_str not in settings["signal_history"]: settings["signal_history"][today_str] = {}
-
-        for ticker, df_hist in hist_map.items():
-            df = df_hist
-            if ticker in quotes_map:
-                df = await asyncio.to_thread(merge_and_recalc_sync, df_hist, quotes_map[ticker])
-            
-            if df is None or df.empty: continue
-
-            user_ids = ticker_user_map[ticker]
-            all_alerted = True
-            users_to_ping = []
-            for uid in user_ids:
-                status_key = f"{ticker}-{today_str}"
-                status = users_data[uid]['daily_status'].get(status_key, "NONE")
-                if status == "NONE":
-                    users_to_ping.append(uid)
-                    all_alerted = False
-            
-            if all_alerted: continue
-
-            history = settings.get("signal_history", {})
-            in_cooldown = False
-            cooldown_days = CONFIG["system"]["cooldown_days"]
-            last_signal_score = 0
-            
-            for i in range(1, cooldown_days + 1): 
-                past_date = (now_et.date() - timedelta(days=i)).strftime("%Y-%m-%d")
-                if past_date in history and ticker in history[past_date]:
-                    last_signal_score = history[past_date][ticker].get("score", 0)
-                    in_cooldown = True 
-            
-            is_triggered, score, reason, res_line, sup_line, anchor_idx, rvol = await check_signals(df, ticker)
-            
-            today_signal_data = settings["signal_history"][today_str].get(ticker)
-            if today_signal_data:
-                today_score = today_signal_data.get("score", 0)
-                if score <= today_score:
-                    is_triggered = False
-                    logging.info(f"Ticker {ticker} skipped because a signal with score {today_score} was already sent today.")
-
-            if is_triggered and in_cooldown and last_signal_score > 0:
-                if score <= last_signal_score:
-                    logging.info(f"Ticker {ticker} skipped due to cooldown (Last Score: {last_signal_score}).")
-                    is_triggered = False
-            
-            if is_triggered:
-                price = df['close'].iloc[-1]
-                stop_loss, support = calculate_risk_levels(df)
-                
-                alert_obj = {
-                    "ticker": ticker,
-                    "score": score, 
-                    "priority": score, 
-                    "price": price,
-                    "reason": reason,
-                    "support": support,
-                    "stop_loss": stop_loss,
-                    "df": df,
-                    "res_line": res_line,
-                    "sup_line": sup_line,
-                    "anchor_idx": anchor_idx, 
-                    "users": users_to_ping,
-                    "rvol": rvol 
-                }
-                alerts_buffer.append(alert_obj)
-
-        if alerts_buffer:
-            alerts_buffer.sort(key=lambda x: x["priority"], reverse=True)
-            max_charts = CONFIG["system"]["max_charts_per_scan"]
-            sent_charts = 0
-            summary_list = []
-
-            for alert in alerts_buffer:
-                ticker = alert["ticker"]
-                score = alert["score"]
-                users = alert["users"]
-                
-                current_hist = settings["signal_history"][today_str].get(ticker, {})
-                settings["signal_history"][today_str][ticker] = {
-                    "score": score,
-                    "price": alert["price"],
-                    "time": now_et.strftime('%H:%M'),
-                    "reason": alert["reason"],
-                    "ret_1d": current_hist.get("ret_1d"),
-                    "ret_5d": current_hist.get("ret_5d"),
-                    "ret_10d": current_hist.get("ret_10d"),
-                    "ret_20d": current_hist.get("ret_20d"),
-                }
-                
-                for uid in users:
-                    status_key = f"{ticker}-{today_str}"
-                    users_data[uid]['daily_status'][status_key] = "MARKET_SENT"
-                
-                mentions = " ".join([f"<@{uid}>" for uid in users])
-                
-                if sent_charts < max_charts:
-                    chart_buf = await generate_chart(
-                        alert["df"], ticker, alert["res_line"], alert["sup_line"], 
-                        alert["stop_loss"], alert["support"], alert["anchor_idx"]
-                    )
-                    filename = f"{ticker}.png"
-                    
-                    embed = create_alert_embed(
-                        ticker, score, alert['price'], alert['reason'], 
-                        alert['stop_loss'], alert['support'], alert['df'], filename,
-                        rvol=alert["rvol"]
-                    )
-                    
-                    try:
-                        file = discord.File(chart_buf, filename=filename)
-                        await self.alert_channel.send(content=mentions, embed=embed, file=file)
-                        sent_charts += 1
-                        await asyncio.sleep(1.5)
-                    except Exception as e: logging.error(f"Send Error: {e}")
-                    finally:
-                        chart_buf.close() 
-                else:
-                    summary_list.append(f"**{ticker}** ({score})")
-
-            if summary_list:
-                summary_msg = f"**其他提醒 (摘要)**:\n" + " | ".join(summary_list)
-                try: 
-                    await self.alert_channel.send(content=summary_msg)
-                except: pass
-            
-            save_settings()
-        
-        logging.info(f"[{now_et.strftime('%H:%M')}] Scan finished. Alerts: {len(alerts_buffer)}")
-
-intents = discord.Intents.default()
-client = StockBotClient(intents=intents)
-
-@client.tree.command(name="reset_stats", description="Reset all backtest statistics")
-async def reset_stats(interaction: discord.Interaction):
-    global settings
-    settings["signal_history"] = {}
-    save_settings()
-    await interaction.response.send_message("Statistics reset.", ephemeral=True)
-
-@client.tree.command(name="watch_add", description="Add stocks to watch list (e.g., AAPL, TSLA)")
-@app_commands.describe(codes="Stock Symbols")
-async def watch_add(interaction: discord.Interaction, codes: str):
-    await interaction.response.defer()
-    user_data = get_user_data(interaction.user.id)
-    new_list = list(set([t.strip().upper() for t in codes.replace(',', ' ').replace('，', ' ').split() if t.strip()]))
-    current_set = set(user_data["stocks"])
-    current_set.update(new_list)
-    user_data["stocks"] = list(current_set)
-    save_settings()
-    asyncio.create_task(RVOLCalculator.precalculate_baselines(new_list))
-    await interaction.followup.send(f"Added: `{', '.join(new_list)}`")
-
-@client.tree.command(name="watch_remove", description="Remove stocks from watch list")
-@app_commands.describe(codes="Stock Symbols")
-async def watch_remove(interaction: discord.Interaction, codes: str):
-    await interaction.response.defer()
-    user_data = get_user_data(interaction.user.id)
-    to_remove = set([t.strip().upper() for t in codes.replace(',', ' ').replace('，', ' ').split() if t.strip()])
-    current_list = user_data["stocks"]
-    new_list = [s for s in current_list if s not in to_remove]
-    user_data["stocks"] = new_list
-    for t in to_remove:
-        keys_to_del = [k for k in user_data['daily_status'] if k.startswith(t)]
-        for k in keys_to_del: del user_data['daily_status'][k]
-    save_settings()
-    await interaction.followup.send(f"Removed: `{', '.join(to_remove)}`")
-
-@client.tree.command(name="watch_list", description="Show my watch list")
-async def watch_list(interaction: discord.Interaction):
-    stocks = get_user_data(interaction.user.id)["stocks"]
-    if len(stocks) > 60: display_str = ", ".join(stocks[:60]) + f"... ({len(stocks)})"
-    else: display_str = ", ".join(stocks) if stocks else 'Empty'
-    await interaction.response.send_message(f"List:\n`{display_str}`", ephemeral=True)
-
-@client.tree.command(name="watch_clear", description="Clear all watched stocks")
-async def watch_clear(interaction: discord.Interaction):
-    user_data = get_user_data(interaction.user.id)
-    user_data["stocks"] = []
-    user_data["daily_status"] = {}
-    save_settings()
-    await interaction.response.send_message("Cleared.", ephemeral=True)
-
-@client.tree.command(name="watch_import", description="Import preset lists")
-@app_commands.choices(preset=[
-    app_commands.Choice(name="NASDAQ 100", value="NASDAQ_100"),
-    app_commands.Choice(name="GOD TIER", value="GOD_TIER")
-])
-async def watch_import(interaction: discord.Interaction, preset: app_commands.Choice[str]):
-    await interaction.response.defer()
-    user_data = get_user_data(interaction.user.id)
-    new_list = STOCK_POOLS.get(preset.value, [])
-    current_set = set(user_data["stocks"])
-    current_set.update(new_list)
-    user_data["stocks"] = list(current_set)
-    save_settings()
-    asyncio.create_task(RVOLCalculator.precalculate_baselines(new_list))
-    await interaction.followup.send(f"Imported {preset.name} ({len(new_list)} stocks).")
-
-@client.tree.command(name="stats", description="View historical signal accuracy (20-day window)")
-async def stats_command(interaction: discord.Interaction):
-    await interaction.response.defer()
-    
-    await update_stats_data()
-    
-    load_settings()
-    history = settings.get("signal_history", {})
-    market_df = await fetch_market_index_data(days=80)
-
-    def get_market_ret(date_str, offset_days):
-        if market_df is None or market_df.empty: return None
-        try:
-            target_date = pd.to_datetime(date_str).normalize()
-            idx = market_df.index.get_indexer([target_date], method='nearest')[0]
-            if idx + offset_days < len(market_df):
-                p_start = market_df.iloc[idx]['price']
-                p_end = market_df.iloc[idx + offset_days]['price']
-                return ((p_end - p_start) / p_start) * 100
-        except:
-            pass
-        return None
-
-    stats_agg = {
-        k: {"s_sum": 0.0, "s_c": 0, "m_sum": 0.0, "m_c": 0, "w": 0} 
-        for k in ["1d", "5d", "10d", "20d"]
-    }
-    
-    seen_tickers = set()
-    valid_signals = []
-    
-    sorted_dates = sorted(history.keys(), reverse=True)
-    today = datetime.now().date()
-    
-    for date_str in sorted_dates:
-        try:
-            sig_date = datetime.strptime(date_str, "%Y-%m-%d").date()
-        except: continue
-        
-        days_diff = (today - sig_date).days
-        if days_diff > 25: continue
-        
-        tickers_data = history[date_str]
-        for ticker, data in tickers_data.items():
-            if data.get("score", 0) == 0: continue
-
-            if ticker in seen_tickers: continue
-            seen_tickers.add(ticker)
-            
-            score = data.get("score", 0)
-            valid_signals.append((date_str, ticker, score, data))
-            
-            for k, days_off in [("1d", 1), ("5d", 5), ("10d", 10), ("20d", 20)]:
-                m = get_market_ret(date_str, days_off) 
-                if m is not None:
-                    stats_agg[k]["m_sum"] += m
-                    stats_agg[k]["m_c"] += 1
-
-                r = data.get(f"ret_{k}")
-                if r is not None:
-                    stats_agg[k]["s_sum"] += r
-                    stats_agg[k]["s_c"] += 1
-                    if r > 0: stats_agg[k]["w"] += 1
-
-    embed = discord.Embed(title="回测统计", color=0x00BFFF)
-    
-    def mk_field(key):
-        d = stats_agg[key]
-        
-        if d["s_c"] > 0:
-            avg_stock = d["s_sum"] / d["s_c"]
-            avg_stock_str = f"`{avg_stock:+.2f}%`"
-            win_rate = f"`{d['w']/d['s_c']*100:.0f}%`"
-        else:
-            avg_stock = None
-            avg_stock_str = "Wait..."
-            win_rate = "-"
-
-        if d["m_c"] > 0:
-            avg_market = d["m_sum"] / d["m_c"]
-            avg_market_str = f"`{avg_market:+.2f}%`"
-        else:
-            if d["s_c"] == 0 and market_df is not None and not market_df.empty:
-                try:
-                    days_offset = int(key[:-1])
-                    if len(market_df) > days_offset:
-                        p_now = market_df.iloc[-1]['price']
-                        p_prev = market_df.iloc[-(days_offset+1)]['price']
-                        val = ((p_now - p_prev) / p_prev) * 100
-                        avg_market = val
-                        avg_market_str = f"`{val:+.2f}%`"
-                    else:
-                        avg_market = None
-                        avg_market_str = "Wait..."
-                except:
-                    avg_market = None
-                    avg_market_str = "Wait..."
-            else:
-                avg_market = None
-                avg_market_str = "Wait..."
-        
-        if avg_market is not None and isinstance(avg_market, float):
-            avg_market_str = f"`{avg_market:+.2f}%`"
-        else:
-            avg_market_str = "Wait..."
-
-        if avg_stock is not None and avg_market is not None and isinstance(avg_market, float):
-            diff = avg_stock - avg_market
-            diff_str = f"**{diff:+.2f}%**"
-        else:
-            diff_str = "-"
-        
-        return (
-            f"个股平均: {avg_stock_str}\n"
-            f"纳指同期: {avg_market_str}\n"
-            f"超额收益: {diff_str}\n"
-            f"个股胜率: {win_rate}"
-        )
-
-    embed.add_field(name="1日表现", value=mk_field("1d"), inline=True)
-    embed.add_field(name="5日表现", value=mk_field("5d"), inline=True)
-    embed.add_field(name="10日表现", value=mk_field("10d"), inline=True)
-    embed.add_field(name="20日表现", value=mk_field("20d"), inline=True)
 
     recent_list_str = []
     for date_str, ticker, score, data in valid_signals[:10]:
