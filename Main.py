@@ -49,7 +49,7 @@ TIME_MARKET_OPEN = time(9, 30)
 TIME_MARKET_SCAN_START = time(10, 0) # 10点才开始报
 TIME_MARKET_CLOSE = time(16, 0)
 
-# --- 核心策略配置 (RVOL 加强版 + 四维共振 + 历史分位布林 + 可配旗形) ---
+# --- 核心策略配置 (RVOL 加强版 + 四维共振 + 全动态布林 + 可配旗形) ---
 CONFIG = {
     # [1] 过滤器：左侧抄底核心 (一票否决制)
     "filter": {
@@ -61,11 +61,12 @@ CONFIG = {
         
         "min_rvol": 1.2,              # [核心] RVOL 必须 > 1.2 (比历史同期活跃20%以上)
         
-        # [布林带动态配置 - 历史分位版]
-        # 逻辑：只要当前带宽处于过去半年的"极窄区间"(前15%)，且今日突然扩大，即视为机会
-        "bb_history_lookback": 120,   # [历史窗口] 回顾过去 120 天 (约半年)
-        "bb_squeeze_percentile": 0.15,# [极窄定义] 昨天的带宽必须处于历史最低的 15% 分位以内
-        "bb_expansion_rate": 1.2,     # [动态扩张] 今天带宽 / 昨天带宽 >= 1.2 (扩大20%算启动)
+        # [布林带动态配置 - 全动态版]
+        # 逻辑：过去N天带宽稳定 + 股价振幅小(横盘) -> 今天带宽突然放大
+        "bb_squeeze_days": 5,         # [挤压窗口] 回溯考察过去多少天
+        "bb_squeeze_tolerance": 0.03, # [带宽稳定] 考察期内，带宽最大值与最小值的差需小于此值
+        "max_consolidation_amp": 0.05,# [股价横盘] 考察期内，股价(High-Low)/Low 的振幅需小于 5%
+        "bb_expansion_rate": 1.2,     # [动态扩张] 今天带宽 / 考察期平均带宽 >= 1.2 (扩大20%)
         
         "max_bottom_pos": 0.30,       # [位置] 价格在过去60天区间的位置 (0.3表示底部30%)
         "min_adx_for_squeeze": 15     # [趋势] ADX 最小门槛，确保不是死水
@@ -95,7 +96,7 @@ CONFIG = {
         "RESONANCE": {
             "window_days": 5,         # [窗口] 回溯过去 5 天寻找背离信号
             "min_signals": 2,         # [阈值] 至少需要 2 个指标同时背离才算共振
-            "bonus_score": 25         # [加分] 达成共振后的奖励分数
+            "bonus_score": 30         # [加分] 达成共振后的奖励分数
         },
 
         # [4.2] 策略参数
@@ -127,8 +128,8 @@ CONFIG = {
             "HEAVY_INSTITUTIONAL": 20, # [量能] 纯粹的机构异动 (高 RVOL)
             
             "MACD_ZERO_CROSS": 10,  # [指标] MACD 0轴金叉
-            "MACD_DIVERGE": 15,     # [指标] MACD 底背离 (常规)
-            "KDJ_REBOUND": 10,      # [指标] KDJ 超卖反弹
+            "MACD_DIVERGE": 10,     # [指标] MACD 底背离 (常规)
+            "KDJ_REBOUND": 5,      # [指标] KDJ 超卖反弹
             "CANDLE_PATTERN": 5     # [K线] 吞没/晨星/锤子
         },
 
@@ -788,32 +789,37 @@ def check_signals_sync(df, ticker): # [修改] 传入 ticker
 
     # --- 纯粹抄底信号逻辑 ---
     
-    # [A] 布林带挤压 + 低位 (历史分位逻辑)
-    bb_lookback = CONFIG["filter"]["bb_history_lookback"]
-    bb_pct = CONFIG["filter"]["bb_squeeze_percentile"]
+    # [A] 布林带挤压 + 低位 (全动态逻辑)
+    bb_squeeze_days = CONFIG["filter"]["bb_squeeze_days"]
+    bb_squeeze_tol = CONFIG["filter"]["bb_squeeze_tolerance"]
     bb_expand_rate = CONFIG["filter"]["bb_expansion_rate"]
+    max_cons_amp = CONFIG["filter"].get("max_consolidation_amp", 0.05)
     max_pos = CONFIG["filter"]["max_bottom_pos"]
     price_pos = (curr['close'] - low_60) / (high_60 - low_60) if high_60 > low_60 else 0.5
     
-    # 确保历史数据足够
-    if len(df) > bb_lookback:
-        # 1. 昨天的带宽是否处于历史低位 (前15%)
-        # 提取过去 N 天的带宽数据
-        history_widths = df['BB_Width'].iloc[-(bb_lookback+1):-1] 
-        # 计算分位数阈值
-        squeeze_threshold = history_widths.quantile(bb_pct)
+    if len(df) > bb_squeeze_days + 1:
+        # 提取过去 N 天（不含今天）的数据
+        past_widths = df['BB_Width'].iloc[-(bb_squeeze_days+1):-1]
+        past_closes = df['close'].iloc[-(bb_squeeze_days+1):-1]
         
-        prev_width = prev['BB_Width']
+        # 计算过去几天的带宽极差 (Max - Min)
+        width_diff = past_widths.max() - past_widths.min()
         
-        if prev_width <= squeeze_threshold:
-            # 2. 今天是否突然扩大
-            prev_width_safe = prev_width if prev_width > 0 else 0.001
-            width_ratio = curr['BB_Width'] / prev_width_safe
+        # 计算过去几天的股价振幅 (High - Low) / Low (简化为 MaxClose-MinClose / MinClose)
+        price_amp = (past_closes.max() - past_closes.min()) / past_closes.min()
+        
+        # 逻辑：过去稳定（带宽波动小 + 股价横盘）+ 今天爆发
+        is_stable_width = width_diff <= bb_squeeze_tol
+        is_sideways_price = price_amp <= max_cons_amp
+        
+        if is_stable_width and is_sideways_price:
+            avg_width = past_widths.mean()
+            width_ratio = curr['BB_Width'] / avg_width if avg_width > 0 else 1.0
             
             if width_ratio >= bb_expand_rate:
                 if curr['close'] > curr['open']: # 必须收阳
                     if price_pos <= max_pos: # 必须低位
-                        triggers.append(f"BB Squeeze: 历史极窄启动 (扩:{width_ratio:.2f}x, 位:{price_pos:.2f})")
+                        triggers.append(f"BB Squeeze: 盘整启动 (稳{bb_squeeze_days}日, 扩{width_ratio:.2f}x)")
                         score += weights["BB_SQUEEZE"]
 
     # [B] ADX 趋势启动
@@ -1413,26 +1419,26 @@ class StockBotClient(discord.Client):
         embed.add_field(name="5日表现", value=mk_field("5d"), inline=True)
         embed.add_field(name="10日表现", value=mk_field("10d"), inline=True)
         embed.add_field(name="20日表现", value=mk_field("20d"), inline=True)
-
-    recent_list_str = []
-    for date_str, ticker, score, data in valid_signals[:10]:
-        r1 = data.get("ret_1d")
-        r1_str = f"{r1:+.1f}%" if r1 is not None else "-"
-        r5 = data.get("ret_5d")
-        r5_str = f"{r5:+.1f}%" if r5 is not None else "-"
-        r10 = data.get("ret_10d")
-        r10_str = f"{r10:+.1f}%" if r10 is not None else "-"
-        r20 = data.get("ret_20d")
-        r20_str = f"{r20:+.1f}%" if r20 is not None else "-"
         
-        recent_list_str.append(f"`{date_str}` **{ticker}**\n└ 1D:`{r1_str}` 5D:`{r5_str}` 10D:`{r10_str}` 20D:`{r20_str}`")
+        recent_list_str = []
+        for date_str, ticker, score, data in valid_signals[:5]:
+            r1 = data.get("ret_1d")
+            r1_str = f"{r1:+.1f}%" if r1 is not None else "-"
+            r5 = data.get("ret_5d")
+            r5_str = f"{r5:+.1f}%" if r5 is not None else "-"
+            r10 = data.get("ret_10d")
+            r10_str = f"{r10:+.1f}%" if r10 is not None else "-"
+            r20 = data.get("ret_20d")
+            r20_str = f"{r20:+.1f}%" if r20 is not None else "-"
+            
+            recent_list_str.append(f"`{date_str}` **{ticker}**\n└ 1D:`{r1_str}` 5D:`{r5_str}` 10D:`{r10_str}` 20D:`{r20_str}`")
         
-    if recent_list_str:
-        embed.add_field(name="详细情况", value="\n".join(recent_list_str), inline=False)
-    else:
-        embed.add_field(name="详细情况", value="无近期信号", inline=False)
-        
-    await interaction.followup.send(embed=embed)
+        if recent_list_str:
+            embed.add_field(name="详细情况", value="\n".join(recent_list_str), inline=False)
+        else:
+            embed.add_field(name="详细情况", value="无近期信号", inline=False)
+            
+        await interaction.followup.send(embed=embed)
 
 @client.tree.command(name="test", description="Test single stock")
 async def test_command(interaction: discord.Interaction, ticker: str):
