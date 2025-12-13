@@ -67,13 +67,15 @@ CONFIG = {
         "max_rsi": 60,                # [防过热] RSI(14) 超过 60 则不看
         "max_bias_50": 0.20,          # [防回落] 现价偏离 50日均线 20% 以上不看
         "max_upper_shadow": 0.4,      # [防抛压] 上影线长度占整根K线 40% 以上不看
-        "max_day_change": 0.07,        # [防妖股] 单日涨跌幅超过 7% 不看
+        "max_day_change": 0.07,       # [防妖股] 单日涨跌幅超过 7% 不看
         
         "min_rvol": 1.2,              # [核心] RVOL 必须 > 1.2 (比历史同期活跃20%以上)
         
         # [布林带动态配置 - 修改部分]
         "min_bb_squeeze_width": 0.10, # [前置条件] 昨日带宽需小于此值 (定义什么是"窄")
         "bb_expansion_rate": 1.2,     # [动态扩张] 今天带宽 / 昨天带宽 >= 1.2 (即扩大20%才算开口)
+        "bb_squeeze_days": 10,        # 新增配置: 盘整天数
+        "bb_squeeze_tolerance": 0.05, # 新增配置: 盘整容差
         
         "max_bottom_pos": 0.30,       # [位置] 价格在过去60天区间的位置 (0.3表示底部30%)
         "min_adx_for_squeeze": 15     # [趋势] ADX 最小门槛，确保不是死水
@@ -81,14 +83,16 @@ CONFIG = {
 
     # [2] 形态识别
     "pattern": {
-        "pivot_window": 10            # [关键点] 识别高低点的前后窗口天数
+        "pivot_window": 10,           # [关键点] 识别高低点的前后窗口天数
+        "support_tolerance": 0.02,    # 新增配置
+        "support_window": 3           # 新增配置
     },
 
     # [3] 系统设置
     "system": {
         "cooldown_days": 3,           # [防刷屏] 发出信号后的冷却天数
         "max_charts_per_scan": 5,     # [防拥堵] 每次扫描最大发送图表数量
-        "history_days": 300           # [数据源] 获取历史数据的天数
+        "history_days": 300           # [数据源] 获取历史数据的天数 (用于MA50/Ribbon等)
     },
 
     # [4] 打分系统
@@ -132,7 +136,7 @@ CONFIG = {
             
             "MACD_ZERO_CROSS": 10,  # [指标] MACD 0轴金叉
             "MACD_DIVERGE": 10,     # [指标] MACD 底背离 (常规)
-            "KDJ_REBOUND": 5,      # [指标] KDJ 超卖反弹
+            "KDJ_REBOUND": 5,       # [指标] KDJ 超卖反弹
             "CANDLE_PATTERN": 5     # [K线] 吞没/晨星/锤子
         },
 
@@ -196,22 +200,28 @@ def get_user_data(user_id):
     return settings["users"][uid_str]
 
 # -----------------------------------------------------------------------------
-# [核心] RVOL 计算器
+# [核心] RVOL 计算器 - 已修改：支持开盘前获取，识别冬夏令时，缩短回溯时间
 # -----------------------------------------------------------------------------
 class RVOLCalculator:
     @staticmethod
     async def precalculate_baselines(symbols):
         global rvol_baseline_cache
-        logging.info(f"Start pre-calculating RVOL baselines for {len(symbols)} tickers...")
+        # 获取美东时间当前时间，用于计算准确的日期范围
+        ny_now = datetime.now(MARKET_TIMEZONE)
+        logging.info(f"Start pre-calculating RVOL baselines for {len(symbols)} tickers. Time (ET): {ny_now.strftime('%Y-%m-%d %H:%M')}")
         
-        start_date = (datetime.now() - timedelta(days=25)).strftime("%Y-%m-%d")
-        end_date = datetime.now().strftime("%Y-%m-%d")
+        # [修改] 计算日期范围：过去 30 个自然日 (约 20-22 个交易日)
+        # 满足"只需要20个交易日"的需求，同时避免回溯 40 天过长
+        end_date_str = ny_now.strftime("%Y-%m-%d")
+        start_date = ny_now - timedelta(days=30) 
+        start_date_str = start_date.strftime("%Y-%m-%d")
         
         connector = aiohttp.TCPConnector(limit=5)
         semaphore = asyncio.Semaphore(5)
         
         async def fetch_intraday(session, sym):
-            url = f"https://financialmodelingprep.com/stable/historical-chart/5min/{sym}?from={start_date}&to={end_date}&apikey={FMP_API_KEY}"
+            # 获取 5分钟级别 K线
+            url = f"https://financialmodelingprep.com/stable/historical-chart/5min/{sym}?from={start_date_str}&to={end_date_str}&apikey={FMP_API_KEY}"
             async with semaphore:
                 retries = 3
                 for i in range(retries):
@@ -237,18 +247,38 @@ class RVOLCalculator:
             try:
                 df = pd.DataFrame(data)
                 if 'date' not in df.columns or 'volume' not in df.columns: continue
-                df['date'] = pd.to_datetime(df['date']).dt.tz_localize('UTC').dt.tz_convert(MARKET_TIMEZONE)
+                
+                # [关键] 时间处理：识别冬夏令时
+                # FMP historical-chart 通常返回的是美东时间的墙上时间（Wall Clock Time）字符串
+                df['date'] = pd.to_datetime(df['date'])
+                
+                # 如果是 naive time (没有时区信息)，则假定为美东时间并添加时区信息
+                if df['date'].dt.tz is None:
+                    df['date'] = df['date'].dt.tz_localize(MARKET_TIMEZONE, ambiguous='NaT', nonexistent='shift_forward')
+                else:
+                    df['date'] = df['date'].dt.tz_convert(MARKET_TIMEZONE)
+                
+                # 过滤无效时间（NaT）
+                df = df.dropna(subset=['date'])
+
                 df['time_str'] = df['date'].dt.strftime('%H:%M')
                 df['date_only'] = df['date'].dt.date
+                
+                # 仅保留交易时段 09:30 - 16:00
                 df = df[(df['time_str'] >= '09:30') & (df['time_str'] <= '16:00')]
                 df = df.sort_values('date')
+                
+                # 计算当日累计成交量
                 df['cum_vol'] = df.groupby('date_only')['volume'].cumsum()
+                
+                # 计算过去 N 天的中位数作为基准
+                # 这里的数据已经是经过筛选的过去 ~30 天内的交易日数据 (约20个交易日)
                 baseline = df.groupby('time_str')['cum_vol'].median()
                 rvol_baseline_cache[sym] = baseline.to_dict()
                 count_ok += 1
             except Exception as e:
                 logging.error(f"Error processing RVOL for {sym}: {e}")
-        logging.info(f"RVOL Baselines calculated for {count_ok} stocks.")
+        logging.info(f"RVOL Baselines calculated for {count_ok} stocks (Range: {start_date_str} to {end_date_str}).")
 
     @staticmethod
     def get_current_rvol(ticker, current_cum_vol, ny_time):
@@ -968,8 +998,8 @@ def _generate_chart_sync(df, ticker, res_line=[], sup_line=[], stop_price=None, 
     my_marketcolors = mpf.make_marketcolors(
         up='#d93025',   
         down='#1db954', 
-        edge='inherit',    
-        wick='inherit',    
+        edge='inherit',     
+        wick='inherit',     
         volume=volume_color,
         ohlc='inherit'
     )
@@ -1111,6 +1141,7 @@ class StockBotClient(discord.Client):
         self.tree = app_commands.CommandTree(self)
         self.alert_channel = None
         self.last_report_date = None
+        self.last_baseline_prep_date = None # 记录上次运行数据准备的日期
 
     async def on_ready(self):
         load_settings()
@@ -1120,8 +1151,9 @@ class StockBotClient(discord.Client):
             if self.alert_channel is None:
                 logging.error(f"Could not find channel with ID {ALERT_CHANNEL_ID}")
         else:
-            logging.warning("No ALERT_CHANNEL_ID provided in env.")
+            logging.warning("ALERT_CHANNEL_ID not set or invalid.")
         
+        # 启动时先初始化一次
         asyncio.create_task(self.initialize_baselines())
 
         if not self.monitor_stocks.is_running():
@@ -1129,6 +1161,9 @@ class StockBotClient(discord.Client):
         
         if not self.scheduled_report.is_running():
             self.scheduled_report.start()
+            
+        if not self.daily_market_prep.is_running():
+            self.daily_market_prep.start()
             
         await self.tree.sync()
 
@@ -1141,6 +1176,21 @@ class StockBotClient(discord.Client):
             all_tickers.update(pool)
         if all_tickers:
             await RVOLCalculator.precalculate_baselines(list(all_tickers))
+
+    # [新增] 每日开盘前准备数据的任务
+    @tasks.loop(minutes=1)
+    async def daily_market_prep(self):
+        now_et = datetime.now(MARKET_TIMEZONE)
+        today_date = now_et.date()
+        
+        # 判断是否为周末
+        if now_et.weekday() >= 5: return
+        
+        # 判断是否为美东时间 09:15 (开盘前15分钟) 且今天还没运行过
+        if now_et.hour == 9 and now_et.minute == 15 and self.last_baseline_prep_date != today_date:
+            logging.info(f"[{now_et.strftime('%H:%M')}] Pre-market Preparation Triggered.")
+            await self.initialize_baselines()
+            self.last_baseline_prep_date = today_date
 
     async def send_daily_stats_report(self):
         if not self.alert_channel: return
@@ -1575,6 +1625,7 @@ async def test_command(interaction: discord.Interaction, ticker: str):
     ticker = ticker.upper().strip()
     logging.info(f"[TEST Command] Testing: {ticker}")
 
+    # 这里调用 precalculate_baselines 时，现在只会回溯 30 天 (约 20 个交易日)，速度会变快
     await RVOLCalculator.precalculate_baselines([ticker])
     data_map = await fetch_historical_batch([ticker])
     quotes_map = await fetch_realtime_quotes([ticker])
